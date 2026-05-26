@@ -1,0 +1,50 @@
+seed: 1
+device: auto
+output_dir: runs/smoke_weighted
+
+pde:
+  name: burgers
+  resolution: 64
+  dt: 0.0005
+  viscosity_range: [0.005, 0.03]
+  ic:
+    modes: 3
+    amplitude: 1.0
+
+pool:
+  rounds: 2
+  trajectory_steps: 6
+  n_trajectories: 4
+  uniform_fraction: 0.5
+  loss_proposal: empirical
+
+surrogate:
+  model: conv_unet
+  hidden: 24
+  depth: 2
+  ensemble_size: 1
+  epochs_per_round: 2
+  batch_size: 16
+  lr: 0.001
+  weight_decay: 0.0
+
+ddpm:
+  enabled: true
+  mode: weighted_unconditional
+  steps: 16
+  train_epochs: 1
+  batch_size: 16
+  lr: 0.001
+  hidden: 32
+
+validation:
+  n_trajectories: 8
+  trajectory_steps: 6
+  quantiles: [0.25, 0.5, 0.75, 0.9]
+  rollout_steps: 6
+
+wandb:
+  enabled: false
+  project: poolbased-surrogate-1d
+  group: smoke-weighted
+

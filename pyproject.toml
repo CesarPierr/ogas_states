@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "poolbased-surrogate-1d"
+version = "0.1.0"
+description = "Minimal pool-based active surrogate experiments for 1D PDEs"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "torch",
+    "pyyaml",
+    "wandb",
+]
+
+[tool.setuptools.packages.find]
+include = ["poolbased_surrogate*"]
+
+[tool.black]
+line-length = 100
