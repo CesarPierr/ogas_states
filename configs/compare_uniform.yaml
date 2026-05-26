@@ -1,0 +1,50 @@
+seed: 10
+device: auto
+output_dir: /hoyt/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/compare_uniform
+
+pde:
+  name: burgers
+  resolution: 128
+  dt: 0.0005
+  viscosity_range: [0.005, 0.03]
+  ic:
+    modes: 4
+    amplitude: 1.0
+
+pool:
+  rounds: 4
+  trajectory_steps: 24
+  n_trajectories: 16
+  uniform_fraction: 1.0
+  loss_proposal: empirical
+
+surrogate:
+  model: conv_unet
+  hidden: 48
+  depth: 3
+  ensemble_size: 1
+  epochs_per_round: 5
+  batch_size: 64
+  lr: 0.001
+  weight_decay: 0.0
+
+ddpm:
+  enabled: false
+  mode: conditional_loss
+  steps: 32
+  train_epochs: 1
+  batch_size: 64
+  lr: 0.001
+  hidden: 48
+
+validation:
+  n_trajectories: 32
+  trajectory_steps: 24
+  quantiles: [0.25, 0.5, 0.75, 0.9]
+  rollout_steps: 24
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: compare_uniform
+

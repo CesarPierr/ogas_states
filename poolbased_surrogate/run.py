@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import random
 import sys
+import argparse
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
@@ -65,7 +67,7 @@ def make_mixed_pool(
     return TransitionPool(states, params, next_states)
 
 
-def maybe_wandb(cfg):
+def maybe_wandb(cfg, run_id: str | None):
     if not cfg.wandb.enabled:
         return None
     import wandb
@@ -74,14 +76,70 @@ def maybe_wandb(cfg):
         project=cfg.wandb.project,
         group=cfg.wandb.group,
         config=asdict(cfg),
+        id=run_id,
+        resume="allow" if run_id else None,
     )
+
+
+def save_checkpoint(
+    path: Path,
+    round_id: int,
+    model,
+    ddpm,
+    pool: TransitionPool,
+    history: list[dict[str, float]],
+    rng: np.random.Generator,
+    wandb_run_id: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "next_round": round_id + 1,
+        "surrogate": model.state_dict(),
+        "ddpm": ddpm.state_dict(),
+        "pool": {
+            "states": torch.from_numpy(pool.states),
+            "params": torch.from_numpy(pool.params),
+            "next_states": torch.from_numpy(pool.next_states),
+            "losses": None if pool.losses is None else torch.from_numpy(pool.losses),
+        },
+        "history": history,
+        "numpy_rng_state": rng.bit_generator.state,
+        "torch_rng_state": torch.get_rng_state(),
+        "wandb_run_id": wandb_run_id,
+    }
+    if torch.cuda.is_available():
+        payload["torch_cuda_rng_state"] = torch.cuda.get_rng_state_all()
+    tmp = path.with_suffix(".tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def load_checkpoint(path: Path, model, ddpm, rng: np.random.Generator, device: torch.device):
+    payload = torch.load(path, map_location=device, weights_only=False)
+    model.load_state_dict(payload["surrogate"])
+    ddpm.load_state_dict(payload["ddpm"])
+    p = payload["pool"]
+    pool = TransitionPool(
+        states=p["states"].cpu().numpy(),
+        params=p["params"].cpu().numpy(),
+        next_states=p["next_states"].cpu().numpy(),
+        losses=None if p["losses"] is None else p["losses"].cpu().numpy(),
+    )
+    rng.bit_generator.state = payload["numpy_rng_state"]
+    torch.set_rng_state(payload["torch_rng_state"].cpu())
+    if torch.cuda.is_available() and "torch_cuda_rng_state" in payload:
+        torch.cuda.set_rng_state_all(payload["torch_cuda_rng_state"])
+    return int(payload["next_round"]), pool, list(payload["history"]), str(payload["wandb_run_id"])
 
 
 def main(argv: list[str] | None = None) -> None:
     argv = argv or sys.argv[1:]
-    if len(argv) != 1:
-        raise SystemExit("Usage: python -m poolbased_surrogate.run <config.yaml>")
-    cfg = load_config(argv[0])
+    parser = argparse.ArgumentParser()
+    parser.add_argument("config")
+    parser.add_argument("--resume", action="store_true", help="Resume from output_dir/checkpoint_latest.pt")
+    parser.add_argument("--fresh", action="store_true", help="Ignore an existing checkpoint")
+    args = parser.parse_args(argv)
+    cfg = load_config(args.config)
     out = Path(cfg.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.resolved.json").write_text(json.dumps(asdict(cfg), indent=2))
@@ -105,11 +163,19 @@ def main(argv: list[str] | None = None) -> None:
         steps=cfg.ddpm.steps,
         conditional=cfg.ddpm.mode == "conditional_loss",
     ).to(device)
-    run = maybe_wandb(cfg)
-
+    checkpoint = out / "checkpoint_latest.pt"
+    start_round = 0
     pool = make_uniform_pool(pde, cfg.pool.n_trajectories, cfg.pool.trajectory_steps, rng)
-    history = []
-    for round_id in range(cfg.pool.rounds):
+    history: list[dict[str, float]] = []
+    wandb_run_id = uuid.uuid4().hex
+    if not cfg.ddpm.enabled and cfg.pool.uniform_fraction < 1.0:
+        raise ValueError("ddpm.enabled=false requires pool.uniform_fraction=1.0")
+    if args.resume and not args.fresh and checkpoint.exists():
+        start_round, pool, history, wandb_run_id = load_checkpoint(checkpoint, model, ddpm, rng, device)
+        print(f"resumed from {checkpoint} at round {start_round}")
+    run = maybe_wandb(cfg, wandb_run_id)
+
+    for round_id in range(start_round, cfg.pool.rounds):
         if round_id > 0:
             pool = make_mixed_pool(
                 pde=pde,
@@ -168,6 +234,7 @@ def main(argv: list[str] | None = None) -> None:
         np.savez_compressed(out / f"pool_round_{round_id}.npz", states=pool.states, params=pool.params, next_states=pool.next_states, losses=pool.losses)
         torch.save(model.state_dict(), out / "surrogate.pt")
         torch.save(ddpm.state_dict(), out / "ddpm.pt")
+        save_checkpoint(checkpoint, round_id, model, ddpm, pool, history, rng, wandb_run_id)
 
     (out / "history.json").write_text(json.dumps(history, indent=2))
     if run is not None:
