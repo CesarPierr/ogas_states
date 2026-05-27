@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from ..al4pde_bridge import ExactAL4PDEUnet1D
+
 
 class ConvBlock(nn.Module):
     def __init__(self, channels: int):
@@ -54,9 +56,34 @@ class EnsembleSurrogate(nn.Module):
         return preds.var(dim=0).mean(dim=(1, 2))
 
 
-def build_surrogate(resolution: int, hidden: int, depth: int, ensemble_size: int) -> EnsembleSurrogate:
-    models = [
-        ConvUNet1D(resolution=resolution, hidden=hidden, depth=depth)
-        for _ in range(max(1, int(ensemble_size)))
-    ]
+def build_surrogate(
+    resolution: int,
+    hidden: int,
+    depth: int,
+    ensemble_size: int,
+    param_dim: int = 1,
+    model_name: str = "al4pde_unet1d",
+    difference_weight: float = 0.3,
+) -> EnsembleSurrogate:
+    models = []
+    for _ in range(max(1, int(ensemble_size))):
+        if model_name == "conv_unet":
+            models.append(
+                ConvUNet1D(
+                    resolution=resolution,
+                    param_dim=param_dim,
+                    hidden=hidden,
+                    depth=depth,
+                )
+            )
+        elif model_name == "al4pde_unet1d":
+            models.append(
+                ExactAL4PDEUnet1D(
+                    param_dim=param_dim,
+                    hidden_channels=hidden,
+                    difference_weight=difference_weight,
+                )
+            )
+        else:
+            raise ValueError(f"Unknown surrogate model {model_name}")
     return EnsembleSurrogate(models)

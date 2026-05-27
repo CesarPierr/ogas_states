@@ -13,6 +13,7 @@ dependencies = [
     "torch",
     "pyyaml",
     "wandb",
+    "pillow",
 ]
 
 [tool.setuptools.packages.find]

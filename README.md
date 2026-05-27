@@ -332,15 +332,15 @@ last completed round is reused.
 Using uv:
 
 ```bash
-cd /home/cesarpi-ext/poolbased_surrogate_1d
+cd /home/cesarpi-ext/ogas_states
 scripts/install_uv_env.sh
-source /hoyt/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
+source /bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
 ```
 
 Default env path:
 
 ```text
-/hoyt/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv
+/bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv
 ```
 
 Override:
@@ -376,20 +376,22 @@ python -m poolbased_surrogate.run configs/compare_uniform.yaml --resume
 python -m poolbased_surrogate.run configs/compare_mixed_conditional.yaml --resume
 ```
 
-## Kraken Devel
+## Bigfoot GPU
 
-Submit to OAR `-t devel`:
+Submit to OAR on Bigfoot. By default this pre-creates or verifies the shared
+validation dataset before submitting, so compared experiments use the same
+validation trajectories.
 
 ```bash
 scripts/install_uv_env.sh
-KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_uniform.yaml
-KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_mixed.yaml
+BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_uniform.yaml
+BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
 ```
 
-If devel quota is full, submit the same wrapper in the default queue:
+For the Bigfoot devel sandbox, request a MIG partition:
 
 ```bash
-KRAKEN_OAR_TYPE= KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_uniform.yaml
+BIGFOOT_OAR_TYPE=devel BIGFOOT_WALLTIME=00:30:00 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
 ```
 
 The wrapper runs:
@@ -401,8 +403,8 @@ python -m poolbased_surrogate.run <config> --resume
 Logs:
 
 ```text
-/hoyt/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.out
-/hoyt/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.err
+/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.out
+/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.err
 ```
 
 ## Main Comparison
@@ -470,7 +472,8 @@ poolbased_surrogate/train.py           training helpers
 poolbased_surrogate/eval.py            validation and rollout metrics
 poolbased_surrogate/run.py             experiment entry point
 scripts/install_uv_env.sh              uv env install
-scripts/submit_kraken_devel.sh         OAR devel submit
+scripts/submit_bigfoot.sh              Bigfoot OAR GPU submit
+scripts/submit_kraken_devel.sh         legacy Kraken OAR devel submit
 ```
 
 ## Design Choices

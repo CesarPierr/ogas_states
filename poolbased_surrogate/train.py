@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, TensorDataset
 
-from .data import StateLossDataset, TransitionDataset, TransitionPool
+from .data import TransitionDataset, TransitionPool
 from .models.ddpm import DDPM1D
 from .models.surrogate import EnsembleSurrogate
 
@@ -17,6 +17,8 @@ def train_surrogate(
     lr: float,
     weight_decay: float,
     device: torch.device,
+    epoch_callback=None,
+    round_id: int = 0,
 ) -> dict[str, float]:
     model.train()
     opts = [
@@ -25,7 +27,8 @@ def train_surrogate(
     ]
     loader = DataLoader(TransitionDataset(pool), batch_size=batch_size, shuffle=True, drop_last=False)
     last_losses = []
-    for _ in range(epochs):
+    for epoch in range(epochs):
+        epoch_losses = []
         for state, params, target in loader:
             state = state.to(device)
             params = params.to(device)
@@ -38,6 +41,17 @@ def train_surrogate(
                 torch.nn.utils.clip_grad_norm_(model_i.parameters(), 1.0)
                 opt.step()
             last_losses.append(float(loss.detach().cpu()))
+            epoch_losses.append(float(loss.detach().cpu()))
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "surrogate/epoch_loss": float(np.mean(epoch_losses)),
+                    "surrogate/epoch": epoch,
+                    "surrogate/global_epoch": round_id * epochs + epoch,
+                },
+                epoch,
+            )
+            model.train()
     pool.losses = compute_transition_losses(model, pool, batch_size, device)
     return {"train/loss": float(np.mean(last_losses[-max(1, len(loader)) :]))}
 
@@ -66,29 +80,62 @@ def train_ddpm(
     batch_size: int,
     lr: float,
     device: torch.device,
+    state_mean: float,
+    state_std: float,
+    pde,
     mode: str = "conditional_loss",
+    param_loss_weight: float = 1.0,
+    epoch_callback=None,
+    round_id: int = 0,
 ) -> dict[str, float]:
     if pool.losses is None:
         raise ValueError("Pool losses required before DDPM training.")
     ddpm.train()
     losses = normalize_losses(pool.losses)
-    loader = DataLoader(StateLossDataset(pool.states, losses), batch_size=batch_size, shuffle=True)
+    state_norm = ((pool.states - state_mean) / state_std).astype(np.float32)
+    needs_params = ddpm.use_param_cond or ddpm.generate_params
+    if needs_params:
+        param_scaled = (2.0 * pde.normalize_params(pool.params) - 1.0).astype(np.float32)
+    else:
+        param_scaled = np.zeros((len(pool), max(1, ddpm.param_dim)), dtype=np.float32)
+    dataset = TensorDataset(
+        torch.from_numpy(state_norm),
+        torch.from_numpy(losses.reshape(-1, 1).astype(np.float32)),
+        torch.from_numpy(param_scaled),
+    )
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     opt = torch.optim.AdamW(ddpm.parameters(), lr=lr)
     last = []
-    for _ in range(epochs):
-        for state, loss_value in loader:
+    for epoch in range(epochs):
+        epoch_losses = []
+        for state, loss_value, params in loader:
             opt.zero_grad(set_to_none=True)
-            if mode == "conditional_loss":
-                loss = ddpm.training_loss(state.to(device), loss_value.to(device))
-            elif mode == "weighted_unconditional":
-                weights = 0.05 + loss_value.to(device).view(-1)
-                loss = ddpm.training_loss(state.to(device), None, sample_weight=weights)
-            else:
+            loss_cond = loss_value.to(device) if mode == "conditional_loss" else None
+            sample_weight = 0.05 + loss_value.to(device).view(-1) if mode == "weighted_unconditional" else None
+            params_arg = params.to(device) if needs_params else None
+            if mode not in ("conditional_loss", "weighted_unconditional"):
                 raise ValueError(f"Unknown ddpm mode {mode}")
+            loss = ddpm.training_loss(
+                state.to(device),
+                loss=loss_cond,
+                params=params_arg,
+                sample_weight=sample_weight,
+                param_loss_weight=param_loss_weight,
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ddpm.parameters(), 1.0)
             opt.step()
             last.append(float(loss.detach().cpu()))
+            epoch_losses.append(float(loss.detach().cpu()))
+        if epoch_callback is not None:
+            epoch_callback(
+                {
+                    "ddpm/epoch_loss": float(np.mean(epoch_losses)),
+                    "ddpm/epoch": epoch,
+                    "ddpm/global_epoch": round_id * epochs + epoch,
+                },
+                epoch,
+            )
     return {"ddpm/loss": float(np.mean(last[-max(1, len(loader)) :]))}
 
 

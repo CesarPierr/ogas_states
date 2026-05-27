@@ -1,4 +1,4 @@
-# AGENT.md
+g# AGENT.md
 
 ## Scope
 
@@ -38,9 +38,9 @@ the pool with generated states advanced by one PDE step.
 Install env:
 
 ```bash
-cd /home/cesarpi-ext/poolbased_surrogate_1d
+cd /home/cesarpi-ext/ogas_states
 scripts/install_uv_env.sh
-source /hoyt/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
+source /bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
 ```
 
 Smoke:
@@ -56,17 +56,11 @@ Resume:
 python -m poolbased_surrogate.run configs/default_1d.yaml --resume
 ```
 
-Kraken devel:
+Bigfoot GPU:
 
 ```bash
-KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_uniform.yaml
-KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_mixed.yaml
-```
-
-If devel quota full:
-
-```bash
-KRAKEN_OAR_TYPE= KRAKEN_WALLTIME=00:30:00 KRAKEN_NUM_GPUS=1 scripts/submit_kraken_devel.sh configs/devel_uniform.yaml
+BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_uniform.yaml
+BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
 ```
 
 ## Main Files

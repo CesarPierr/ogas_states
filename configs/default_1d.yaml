@@ -16,7 +16,6 @@ pool:
   trajectory_steps: 75
   n_trajectories: 64
   uniform_fraction: 0.25
-  loss_proposal: empirical
 
 surrogate:
   model: conv_unet

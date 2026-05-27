@@ -1,0 +1,59 @@
+seed: 101
+device: auto
+output_dir: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/bigfoot_suite_wandb/uniform_seed101
+
+pde:
+  name: burgers
+  resolution: 1024
+  domain_length: 1.0
+  dt: 0.01
+  viscosity_range: [0.001, 1.0]
+  param_ranges:
+    - [0.001, 1.0]
+  param_log_scale: [true]
+  ic:
+    k_tot: 4
+    num_choice_k: 2
+    amplitude: 1.0
+    CFL: 0.25
+    show_steps: 100
+    if_second_order: 1.0
+
+pool:
+  rounds: 8
+  trajectory_steps: 70
+  n_trajectories: 250
+  uniform_fraction: 1.0
+
+surrogate:
+  hidden: 16
+  depth: 4
+  ensemble_size: 1
+  epochs_per_round: 30
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: false
+  mode: conditional_loss
+  steps: 128
+  train_epochs: 30
+  batch_size: 256
+  lr: 0.0002
+  hidden: 96
+  loss_condition_scale: 1.0
+
+validation:
+  n_trajectories: 1500
+  trajectory_steps: 100
+  path: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation/burgers_res1024_al4pde_exact_seed42_n1500_t100.npz
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 100
+  epoch_n_trajectories: 256
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: burgers1024_al4pde_setup
