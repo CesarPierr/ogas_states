@@ -20,7 +20,7 @@ import numpy as np
 import torch
 
 from .data import TransitionPool
-from .loss_generator_lab import (
+from .generator_metrics import (
     amplitude_distribution_metrics,
     conditioning_fidelity_metrics,
     intra_bin_diversity_metrics,
