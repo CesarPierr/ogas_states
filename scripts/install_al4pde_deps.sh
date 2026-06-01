@@ -24,8 +24,25 @@ clone_or_update https://github.com/microsoft/pdearena.git "$EXTERNAL_DIR/pdearen
 clone_or_update https://github.com/google/jax-cfd.git "$EXTERNAL_DIR/jax-cfd" d215f13282bd63045fb3455f8fac061653428040
 
 "$PYTHON" -m ensurepip --upgrade
+
+echo "Installing reproducible PyTorch (CUDA 12.1) and cuDNN..."
 "$PYTHON" -m pip install \
-  "jax[cuda12]" \
+  --index-url https://download.pytorch.org/whl/cu121 \
+  "torch==2.5.1+cu121"
+
+"$PYTHON" -m pip install \
+  "nvidia-cudnn-cu12==9.1.0.70"
+
+echo "Installing reproducible JAX (0.4.29) and matching CUDA plugins..."
+"$PYTHON" -m pip install \
+  "jax==0.4.29" \
+  "jaxlib==0.4.29+cuda12.cudnn91" \
+  "jax-cuda12-pjrt==0.4.29" \
+  "jax-cuda12-plugin==0.4.29" \
+  --find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html \
+  --no-deps
+
+"$PYTHON" -m pip install \
   tensordict \
   omegaconf \
   tree-math \
@@ -42,3 +59,4 @@ from al4pde.tasks.sim.burgers import BurgersSim
 from al4pde.modules.unet_cond_1d import Unet1D
 print("AL4PDE 1D dependencies are importable.")
 PY
+

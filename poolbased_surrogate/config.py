@@ -18,6 +18,8 @@ class PDEConfig:
     param_ranges: list[list[float]] | None = None
     param_log_scale: list[bool] | None = None
     ic: dict[str, Any] = field(default_factory=lambda: {"modes": 5, "amplitude": 1.0})
+    n_substeps: int = 1   # internal solver steps per training step (dt_inner = dt/n_substeps)
+    n_warmup: int = 0     # outer steps to discard before recording IC-generated trajectories
 
 
 @dataclass
@@ -44,6 +46,7 @@ class SurrogateConfig:
 @dataclass
 class DDPMConfig:
     enabled: bool = True
+    generator: str = "ddpm"
     mode: str = "conditional_loss"
     param_mode: str = "none"
     steps: int = 64
@@ -51,8 +54,34 @@ class DDPMConfig:
     batch_size: int = 128
     lr: float = 3e-4
     hidden: int = 64
+    residual_blocks: int = 0
+    kernel_size: int = 5
+    loss_metric: str = "mse"
+    # Difficulty signal used to bin the pool for quantile conditioning:
+    #   "loss"         -> surrogate one-step error (loss_metric: mse/rmse/nrmse)
+    #   "ensemble_var" -> epistemic disagreement (variance across ensemble members);
+    #                     isolates the *reducible* uncertainty (needs ensemble_size > 1).
+    difficulty_signal: str = "loss"
     loss_condition_scale: float = 1.0
+    loss_proposal: str = "empirical"
+    loss_quantile_min: float = 0.75
+    loss_quantile_max: float = 1.5
+    param_prior: str = "uniform"
     param_loss_weight: float = 1.0
+    sample_temperature: float = 1.0
+    sample_batch_size: int = 512
+    generated_pool_mode: str = "transition"
+    solver_batch_size: int = 256
+    sample_weight_floor: float = 0.05
+    sample_weight_power: float = 1.0
+    # Quantile-bin conditioning (mode == "conditional_quantile"). The generator is
+    # conditioned on a discrete difficulty bin instead of a continuous loss value.
+    n_quantiles: int = 0
+    quant_embed_dim: int = 0
+    # Quantile sampling law used at generation time: one of
+    # top1, top2, top3, top5, top_half, exp_bias, uniform.
+    sample_strategy: str = "exp_bias"
+    sample_strategy_temp: float = 0.5
 
 
 @dataclass

@@ -235,24 +235,12 @@ def rollout_spacetime_examples(
 ) -> dict[str, np.ndarray]:
     n = min(n_examples, validation.n_trajectories)
     if hard:
-        states0_all = validation.states0
-        params_all = validation.params
-        state = torch.from_numpy(states0_all).to(device)
-        par = torch.from_numpy(params_all).to(device)
-        preds = []
-        model.eval()
-        batch_size = 256
-        final_errors = []
-        for start in range(0, validation.n_trajectories, batch_size):
-            end = min(start + batch_size, validation.n_trajectories)
-            state_b = torch.from_numpy(states0_all[start:end]).to(device)
-            par_b = torch.from_numpy(params_all[start:end]).to(device)
-            for _ in range(steps):
-                state_b = model(state_b, par_b)
-            target_b = validation.trajectories[start:end, steps]
-            err_b = state_b.cpu().numpy() - target_b
-            final_errors.append(np.sqrt(np.mean(err_b**2, axis=(1, 2))))
-        idx = np.argsort(np.concatenate(final_errors))[-n:]
+        # Model-independent difficulty so the SAME example set is shown every round and
+        # every run (comparable figures): rank by mean spatial total-variation of the
+        # ground-truth trajectory over the rollout horizon. Higher TV = rougher = harder.
+        gt = validation.trajectories[:, : steps + 1, 0]  # (N, T+1, L)
+        gt_tv = np.abs(np.diff(gt, axis=-1)).sum(axis=-1).mean(axis=1)  # (N,)
+        idx = np.sort(np.argsort(gt_tv)[-n:])
     else:
         idx = np.linspace(0, validation.n_trajectories - 1, n, dtype=np.int64)
     states0 = validation.states0[idx]

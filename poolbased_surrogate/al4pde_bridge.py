@@ -45,6 +45,9 @@ class AL4PDE1D:
         self.n = int(cfg.resolution)
         self.dt = float(cfg.dt)
         self.length = float(cfg.domain_length)
+        self.n_substeps = max(1, int(getattr(cfg, "n_substeps", 1)))
+        self.n_warmup = max(0, int(getattr(cfg, "n_warmup", 0)))
+        self._sim_cache: dict[int, object] = {}
 
     @property
     def is_ks(self) -> bool:
@@ -155,13 +158,18 @@ class AL4PDE1D:
         return grid.detach().cpu().float()
 
     def simulator(self, steps: int):
+        # Each "outer step" (dataset transition) covers n_substeps × dt time.
+        # The solver runs with the original dt so numerics are unchanged;
+        # we just take n_substeps consecutive solver steps per training transition.
+        n_inner = steps * self.n_substeps          # total solver steps
+        fin_time = self.dt * n_inner               # total time covered
         if self.is_ks:
             from al4pde.tasks.sim.ks_jax import ParametricKSJaxSim
 
             return ParametricKSJaxSim(
                 ini_time=0.0,
                 dt=self.dt,
-                fin_time=self.dt * steps,
+                fin_time=fin_time,
                 pde_name="KSVarLVIC",
                 L=self.length,
             )
@@ -170,7 +178,7 @@ class AL4PDE1D:
 
             return BurgersSim(
                 ini_time=0.0,
-                fin_time=self.dt * steps,
+                fin_time=fin_time,
                 dt=self.dt,
                 CFL=float(self.cfg.ic.get("CFL", 2.5e-1)),
                 show_steps=int(self.cfg.ic.get("show_steps", 100)),
@@ -179,16 +187,33 @@ class AL4PDE1D:
             )
         raise ValueError(f"AL4PDE backend is not configured for PDE {self.name!r}")
 
-    def simulate(self, states: np.ndarray, params: np.ndarray, steps: int) -> np.ndarray:
+    def _run_sim(self, states: np.ndarray, params: np.ndarray, steps: int) -> np.ndarray:
+        """Run the simulator for `steps` outer steps and return shape [B, steps+1, 1, N].
+        Substeps are used internally; output is subsampled to outer timesteps only."""
         if states.shape[0] == 0:
             return np.empty((0, steps + 1, 1, self.n), dtype=np.float32)
-        sim = self.simulator(steps)
+        if steps not in self._sim_cache:
+            self._sim_cache[steps] = self.simulator(steps)
+        sim = self._sim_cache[steps]
         ic = numpy_to_al4pde_ic(states)
         pde_params = torch.from_numpy(params.astype(np.float32))
         grid = self.grid(len(states))
         with torch.no_grad():
             traj, _, _ = sim(ic, pde_params, grid)
-        return al4pde_traj_to_numpy(traj)
+        full = al4pde_traj_to_numpy(traj)  # [B, steps*n_sub+1, 1, N]
+        if self.n_substeps > 1:
+            return full[:, :: self.n_substeps]  # [B, steps+1, 1, N]
+        return full
+
+    def simulate(self, states: np.ndarray, params: np.ndarray, steps: int, apply_warmup: bool = True) -> np.ndarray:
+        """Simulate `steps` outer steps.  When apply_warmup=True and n_warmup>0 the IC
+        is first advanced by n_warmup outer steps before the recorded trajectory starts."""
+        if states.shape[0] == 0:
+            return np.empty((0, steps + 1, 1, self.n), dtype=np.float32)
+        if apply_warmup and self.n_warmup > 0:
+            warmed = self._run_sim(states, params, self.n_warmup)[:, -1]  # [B, 1, N]
+            states = warmed
+        return self._run_sim(states, params, steps)
 
 
 class ExactAL4PDEUnet1D(torch.nn.Module):

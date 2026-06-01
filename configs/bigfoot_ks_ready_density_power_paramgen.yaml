@@ -1,0 +1,71 @@
+seed: 101
+device: auto
+output_dir: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/ks800_ready_variants_5seed/density_power_paramgen_seed101
+
+pde:
+  name: ks
+  resolution: 800
+  domain_length: 64.0
+  dt: 0.05
+  param_ranges:
+    - [0.5, 4.0]
+    - [0.1, 100.0]
+  param_log_scale: [false, false]
+  ic:
+    N: 10
+    lmin: 1
+    lmax: 10
+    amplitude: 1.0
+
+pool:
+  rounds: 20
+  trajectory_steps: 70
+  n_trajectories: 250
+  uniform_fraction: 0.2
+
+surrogate:
+  hidden: 16
+  depth: 4
+  ensemble_size: 1
+  epochs_per_round: 10
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  mode: weighted_unconditional
+  param_mode: generate
+  steps: 64
+  train_epochs: 30
+  batch_size: 128
+  lr: 0.0002
+  hidden: 128
+  residual_blocks: 2
+  kernel_size: 7
+  loss_condition_scale: 1.0
+  loss_proposal: empirical
+  loss_quantile_min: 0.75
+  loss_quantile_max: 1.5
+  param_prior: uniform
+  param_loss_weight: 0.5
+  sample_temperature: 0.9
+  sample_batch_size: 512
+  generated_pool_mode: transition
+  solver_batch_size: 256
+  sample_weight_floor: 0.02
+  sample_weight_power: 2.0
+
+validation:
+  n_trajectories: 1500
+  trajectory_steps: 100
+  path: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation/ks_res800_al4pde_exact_lv_seed42_n1500_t100.npz
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 100
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: ks800_ready_density_power_paramgen

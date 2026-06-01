@@ -1,0 +1,72 @@
+seed: 101
+device: auto
+output_dir: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/ks800_sub5_uf_nrmse_5seed/uf50_tophalf_seed101
+
+pde:
+  name: ks
+  resolution: 800
+  domain_length: 64.0
+  dt: 0.05
+  param_ranges:
+    - [0.5, 4.0]
+    - [10.0, 100.0]
+  param_log_scale: [false, false]
+  n_substeps: 5
+  n_warmup: 20
+  ic:
+    N: 10
+    lmin: 1
+    lmax: 10
+    amplitude: 1.0
+
+pool:
+  rounds: 30
+  trajectory_steps: 70
+  n_trajectories: 250
+  uniform_fraction: 0.50
+
+surrogate:
+  hidden: 32
+  depth: 4
+  ensemble_size: 1
+  epochs_per_round: 15
+  batch_size: 512
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 512
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 2048
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+
+validation:
+  n_trajectories: 1500
+  trajectory_steps: 100
+  path: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation/ks_res800_al4pde_sub5_seed43_n1500_t100.npz
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 100
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: ks800_sub5_uf50_tophalf

@@ -45,9 +45,11 @@ class PDE1D:
     def denormalize_params(self, normed: np.ndarray) -> np.ndarray:
         return self.al4pde.denormalize_params(normed)
 
-    def simulate(self, states: np.ndarray, params: np.ndarray, steps: int) -> np.ndarray:
-        return self.al4pde.simulate(states, params, steps)
+    def simulate(self, states: np.ndarray, params: np.ndarray, steps: int, apply_warmup: bool = True) -> np.ndarray:
+        return self.al4pde.simulate(states, params, steps, apply_warmup=apply_warmup)
 
     def step(self, u: np.ndarray, p: np.ndarray) -> np.ndarray:
+        """Advance states by one outer step.  Never applies warmup — used for
+        DDPM-generated states where the IC may not be on the attractor."""
         states = np.asarray(u, dtype=np.float32)[:, None, :]
-        return self.al4pde.simulate(states, p.astype(np.float32), 1)[:, 1, 0]
+        return self.al4pde.simulate(states, p.astype(np.float32), 1, apply_warmup=False)[:, 1, 0]

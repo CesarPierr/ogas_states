@@ -16,6 +16,7 @@ class TransitionPool:
     source: np.ndarray | None = None
     proposed_losses: np.ndarray | None = None
     pretrain_losses: np.ndarray | None = None
+    uncertainty: np.ndarray | None = None  # per-transition ensemble disagreement
 
     @classmethod
     def from_trajectories(
@@ -45,6 +46,7 @@ class TransitionPool:
         self.source = other.source
         self.proposed_losses = other.proposed_losses
         self.pretrain_losses = other.pretrain_losses
+        self.uncertainty = other.uncertainty
 
     def __len__(self) -> int:
         return int(self.states.shape[0])

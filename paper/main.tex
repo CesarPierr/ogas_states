@@ -1,0 +1,627 @@
+% =====================================================================
+%  Generative Active Learning for Neural PDE Surrogates
+%  Draft: Abstract, Introduction, Related Work, Preliminaries, Method,
+%         (brief) Experimental plan, and full Appendix proofs.
+%
+%  STATUS: conceptual + theoretical contribution with PRELIMINARY evidence.
+%  The empirical study is still being scoped; claims are deliberately hedged.
+%
+%  For NeurIPS submission, replace the preamble below with:
+%      \documentclass{article}
+%      \usepackage[preprint]{neurips_2024}
+%  and remove the \usepackage[margin=1in]{geometry} line.
+% =====================================================================
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage[numbers,square]{natbib}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\theoremstyle{plain}
+\newtheorem{proposition}{Proposition}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{assumption}{Assumption}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+% ---- notation macros ----
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\state}{u}
+\newcommand{\param}{c}
+\newcommand{\manifold}{\mathcal{M}}
+\newcommand{\sol}{\Phi}
+\newcommand{\surr}{f_\theta}
+\newcommand{\lossf}{\ell_\theta}
+\newcommand{\pnat}{p}
+\newcommand{\qtr}{q}
+\newcommand{\qgen}{q_{\mathrm{gen}}}
+\newcommand{\Rp}{\mathcal{R}_{\pnat}}
+\newcommand{\Rq}{\mathcal{R}_{\qtr}}
+\newcommand{\Rinf}{\mathcal{R}_{\infty}}
+\newcommand{\Rcov}{\mathcal{R}_{\mathrm{cov}}}
+\newcommand{\Rdro}{\mathcal{R}_{\mathrm{DRO}}}
+\newcommand{\tube}{\mathcal{T}_{\rho}}
+\newcommand{\unif}{\alpha}
+\newcommand{\Lip}{\mathrm{Lip}}
+\newcommand{\dist}{\mathrm{dist}}
+
+\title{Generative Active Learning for Neural PDE Surrogates:\\
+Targeting Hard States for Coverage and Rollout Stability}
+\author{Anonymous Author(s)\\ Affiliation}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Neural surrogates for time-dependent PDEs are almost always trained on trajectories rolled out from
+random initial conditions. We argue that this is a structurally poor use of an expensive solver:
+trajectory data is strongly autocorrelated and concentrates on the system's attractor, so the rare,
+high-curvature states that dominate worst-case error and destabilize autoregressive rollouts are
+almost never observed---a \emph{coverage} failure that more data from the same distribution cannot fix.
+We reframe surrogate training as a coverage / distributionally-robust objective---uniform accuracy over
+the \emph{loss} rather than over the natural state distribution---and instantiate it with a generative
+active-learning loop that synthesizes states where the surrogate is weak or uncertain. The reframing
+comes with two guarantees that uniform sampling lacks. First, mixing a fraction $\unif$ of uniform data
+caps the covariate-shift penalty at $1/\unif$, turning the explore/exploit trade-off into a
+\emph{bounded} interpolation with an explicit certificate. Second, covering a thin tube around the
+trajectory manifold is precisely the condition under which autoregressive rollouts remain trapped and
+their error stays bounded; this formalizes the exposure-bias failure of one-step-trained surrogates and
+casts hard-state generation as an amortized, anticipatory form of on-distribution training. We also show
+that the standard uniform validation metric \emph{provably cannot} reveal these gains, and propose
+difficulty-stratified and off-manifold evaluation. This paper is primarily a conceptual and theoretical
+contribution; preliminary experiments on the Kuramoto--Sivashinsky equation are consistent with the
+theory---attractor-bulk accuracy is essentially unchanged while one-step error on off-manifold states
+drops sharply and the advantage \emph{grows} with the distance from the attractor---and a systematic
+multi-PDE study is left to future work.
+\end{abstract}
+
+% =====================================================================
+\section{Introduction}\label{sec:intro}
+% =====================================================================
+Learned surrogates for partial differential equations (PDEs) approximate the action of a numerical
+solver at a fraction of its cost, and have become a workhorse of scientific machine learning
+\citep{li2021fno,lu2021deeponet,brandstetter2022mppde,takamoto2022pdebench}. In the time-dependent
+setting that we study, a surrogate $\surr$ learns the solver's \emph{one-step map} $\sol$ and is then
+applied \emph{autoregressively}: long-horizon predictions are produced by repeatedly feeding the
+surrogate its own output. Two facts shape the problem. First, the training data is produced by the very
+solver the surrogate is meant to replace, so every training transition costs a solver call and the
+\emph{choice of which states to simulate} is a genuine resource-allocation problem---the premise of
+active learning (AL) for PDE surrogates \citep{musekamp2024al4pde,settles2009active}. Second, the
+quantity that matters in deployment is rollout fidelity, which is governed not by average one-step
+accuracy but by how errors compound when the surrogate is driven by its own (imperfect) outputs.
+
+\paragraph{The structural weakness of uniform trajectory sampling.}
+The default recipe---sample random initial conditions and parameters, roll out trajectories, train on
+all transitions---has two weaknesses that compound. \emph{(i) Redundancy:} consecutive states along a
+trajectory are highly correlated, so a budget of $N$ simulated transitions yields far fewer than $N$
+independent constraints on the surrogate. \emph{(ii) Coverage:} a trajectory spends almost all its time
+near the system's \emph{attractor}. The induced state distribution $\pnat$ therefore concentrates on a
+low-dimensional set, and the sharp, high-curvature, far-from-typical states---exactly the ones a compact
+surrogate finds hard, and exactly the ones a rollout drifts into when it errs---have $\pnat$-measure
+close to zero. No finite sample from $\pnat$ contains them, and no amount of additional uniform data
+will: this is a failure of \emph{support}, not of sample size. We will argue it is the crux of why
+uniform-trained surrogates are simultaneously accurate ``on average'' and brittle under rollout.
+
+\paragraph{Why the obvious remedy is subtle.}
+A tempting fix is to oversample states where the surrogate has high error or high epistemic uncertainty,
+synthesizing them with a conditional generative model. But there is \emph{no unconditional guarantee}
+that training where the surrogate struggles improves accuracy on the natural distribution. Under model
+misspecification---unavoidable for a compact surrogate of a chaotic PDE---reallocating capacity to rare
+hard modes can \emph{strictly increase} the $\pnat$-average error (we give an explicit example in
+\cref{app:nofreelunch}). Compounding the difficulty, the universal practice of validating on held-out
+\emph{uniform} trajectories measures precisely that $\pnat$-average, and is by construction insensitive
+to improvements on the $\pnat$-rare hard modes. A method doing exactly the right thing can therefore
+appear to do nothing at all. This twin obstacle---no guarantee on the wrong objective, and a metric
+blind to the right one---has, we believe, held back generative approaches to PDE data.
+
+\paragraph{Our reframing: coverage, not average.}
+We contend that the $\pnat$-average is the wrong objective for a \emph{reusable} surrogate. Such a
+surrogate should be accurate on \emph{all reachable states}, i.e.\ it should seek \emph{uniformity over
+the loss}---equal accuracy across the difficulty spectrum, irrespective of how frequently a state is
+visited. This is a coverage / distributionally-robust (DRO) objective
+\citep{benTal2013dro,duchi2021dro,sagawa2020groupdro}, and a difficulty-conditioned generator is its
+natural optimizer: by \emph{synthesizing} $\pnat$-rare-but-reachable states it makes the inner
+maximization of a robust objective both attainable and informative, something a finite candidate pool
+cannot do. The reframing has an immediate methodological consequence: it dictates how to \emph{measure}
+progress, namely on difficulty-stratified and off-manifold validation rather than on uniform data.
+
+\paragraph{From coverage to rollout stability.}
+The coverage view also explains, rather than merely improves, rollout behavior. Autoregressive error
+satisfies $\|e_{k+1}\|\le \lossf^{1/2}(\hat\state_k) + L_{\sol}\|e_k\|$, where---crucially---the one-step
+error is evaluated at the \emph{visited} state $\hat\state_k$, not at the clean trajectory state. As
+errors accumulate, $\hat\state_k$ leaves the attractor manifold into regions a uniform-trained surrogate
+never saw, where its error is uncontrolled; the result is a positive feedback that drives divergence.
+This is exactly the \emph{exposure bias} long studied in sequence modeling and imitation learning
+\citep{bengio2015scheduled,ranzato2016sequence,ross2011dagger}. We show that \emph{covering a tube around
+the manifold uniformly bounds the one-step error there, which traps the rollout inside the tube and
+bounds its error for all horizons} (in the contractive regime) or provably slows divergence (in the
+chaotic regime). Targeting hard states is thus an \emph{anticipatory} on-distribution correction: it
+manufactures the off-manifold states a rollout will visit, before it visits them, and without ever
+unrolling.
+
+\paragraph{Contributions and scope.}
+This paper is primarily a conceptual and theoretical contribution; its empirical component is preliminary
+and a large-scale, multi-PDE study is explicitly future work. Concretely:
+\begin{enumerate}[topsep=2pt,itemsep=1pt,leftmargin=1.4em]
+  \item \textbf{Objective (\cref{sec:method-objective}).} We recast neural-PDE-surrogate training from
+  natural-distribution risk to a coverage / DRO objective (``uniformity over the loss''), and prove that
+  uniform validation cannot, in principle, reveal the resulting gains.
+  \item \textbf{Bounded explore/exploit (\cref{prop:mixture}).} We show that the uniform mixing fraction
+  $\unif$ caps the covariate-shift penalty: $\Rp(\theta)\le \Rq(\theta)/\unif$. Thus $\unif$ is a
+  principled, certificate-bearing interpolation between protecting the bulk and targeting the tail.
+  \item \textbf{Rollout guarantee (\cref{prop:tube}).} We prove a tube-invariance bound linking
+  \emph{coverage} of an off-manifold tube to \emph{bounded autoregressive rollout error}, and relate it
+  to exposure bias and DAgger.
+  \item \textbf{Method and measurement (\cref{sec:method-gen}).} We instantiate the framework with a
+  flow-matching generator conditioned on quantile-binned difficulty (one-step loss or ensemble
+  disagreement) and an evaluation protocol built around difficulty-stratified and off-manifold sets.
+  Preliminary results on Kuramoto--Sivashinsky are consistent with the theory (\cref{sec:exp}).
+\end{enumerate}
+
+% =====================================================================
+\section{Related Work}\label{sec:related}
+% =====================================================================
+\paragraph{Neural PDE surrogates and rollout stability.}
+Operator-learning models \citep{li2021fno,lu2021deeponet} and autoregressive graph/convolutional solvers
+\citep{brandstetter2022mppde} are evaluated at scale by PDEBench \citep{takamoto2022pdebench}. A
+persistent failure mode is rollout instability, where one-step errors compound into divergence. Existing
+remedies act on the \emph{loss or architecture}: injecting noise into training inputs (a one-step
+surrogate for on-distribution exposure), unrolled/multi-step training objectives, and iterative
+denoising of the prediction such as PDE-Refiner \citep{lippe2023pderefiner}. Our diagnosis is
+distributional rather than architectural: the states a rollout drifts into are simply out of the training
+support, and we show that restoring that support---via a generator---is both necessary (\cref{prop:tube})
+and learnable. The two views are complementary: noise injection is a local, isotropic, fixed-scale
+approximation of the off-manifold coverage our generator provides adaptively.
+
+\paragraph{Active learning and experimental design.}
+Pool- and stream-based AL acquire points by uncertainty or expected-error-reduction criteria
+\citep{settles2009active}; Bayesian and ensemble acquisition such as BALD and query-by-committee target
+\emph{epistemic} uncertainty \citep{houlsby2011bald,gal2017dbal,beluch2018ensembles}. For neural PDE
+solvers, recent work selects initial conditions or parameters from a finite candidate pool
+\citep{musekamp2024al4pde}. Our setting differs in kind: a generator \emph{synthesizes} states outside
+any finite pool, which is what makes a coverage objective optimizable rather than merely selectable.
+Online hard-example mining \citep{shrivastava2016ohem} upweights hard cases but only within a fixed
+dataset; we create them.
+
+\paragraph{Distribution shift and distributional robustness.}
+Train/test mismatch is the covariate-shift setting \citep{shimodaira2000covariate}; DRO seeks uniform
+performance over an ambiguity set around the data distribution
+\citep{benTal2013dro,duchi2021dro,sagawa2020groupdro}. We make the connection explicit and
+constructive: a difficulty-conditioned generator approximates the inner adversary of a DRO problem, the
+uniform mixing fraction is the (clipped) ambiguity radius, and the DRO optimum's loss-flattening property
+yields the ``uniformity over the loss'' we target and measure.
+
+\paragraph{Exposure bias and imitation learning.}
+Autoregressive models trained one step at a time accumulate error under their own rollouts; scheduled
+sampling and sequence-level training mitigate this in language models
+\citep{bengio2015scheduled,ranzato2016sequence}, and DAgger formalizes the move from expert- to
+visited-distribution data in imitation learning, improving the horizon dependence from $O(\epsilon H^2)$
+to $O(\epsilon H)$ \citep{ross2011dagger}. We transfer this lens to PDE surrogates and, rather than
+unrolling to collect visited states, \emph{synthesize} them generatively and proactively.
+
+\paragraph{Generative models of physical fields.}
+Diffusion and flow-matching models \citep{ho2020ddpm,lipman2023flow} are strong density models for
+spatial fields. We repurpose a flow-matching model not to sample \emph{typical} states but as a
+controllable \emph{coverage} mechanism, conditioned on a discrete difficulty level and the physical
+parameters.
+
+% =====================================================================
+\section{Preliminaries}\label{sec:prelim}
+% =====================================================================
+\paragraph{Solver, surrogate, and loss.}
+Let $\state\in\R^{L}$ be a spatially discretized field and $\param\in\mathcal{C}\subset\R^{d}$ physical
+parameters (e.g.\ viscosity, domain size). A numerical solver advances the state by one coarse step,
+$\state'=\sol(\state,\param)$, where $\sol$ may itself be several fine substeps. A surrogate
+$\surr:\R^{L}\times\mathcal{C}\to\R^{L}$ approximates $\sol$, trained under the squared one-step loss
+\begin{equation}
+  \lossf(\state,\param)\;=\;\bigl\|\surr(\state,\param)-\sol(\state,\param)\bigr\|^{2},
+\end{equation}
+abbreviated $\lossf(\state)$ when $\param$ is fixed. We write $\manifold\subseteq\R^{L}$ for the set of
+\emph{reachable} states---the closure of all solver trajectories over admissible initial conditions and
+$\param\in\mathcal{C}$. States in $\manifold$ are physically meaningful; states far from $\manifold$ are
+not, which is why a generator's \emph{realism} (that it produces states in or near $\manifold$) is
+essential rather than cosmetic (\cref{sec:method-gen}).
+
+\paragraph{Natural distribution and the validation risk.}
+Drawing random initial conditions and parameters and recording the visited states induces a
+\emph{natural} measure $\pnat$ on $\manifold$, essentially the system's invariant/attractor measure. The
+standard held-out set is sampled from $\pnat$, so the reported validation risk is the
+$\pnat$-\emph{average}
+\begin{equation}
+  \Rp(\theta)\;=\;\E_{\state\sim\pnat}\!\bigl[\lossf(\state)\bigr].
+  \label{eq:Rp}
+\end{equation}
+We train on a possibly different measure $\qtr$ and minimize the empirical version of
+$\Rq(\theta)=\E_{\state\sim\qtr}[\lossf(\state)]$. Our method uses the mixture
+\begin{equation}
+  \qtr\;=\;\unif\,\pnat\;+\;(1-\unif)\,\qgen,\qquad \unif\in[0,1],
+  \label{eq:mixture}
+\end{equation}
+where $\qgen$ is the law of generator-produced hard states and $\unif$ (\texttt{uniform\_fraction}) is
+the fraction of fresh uniform data per round. The reframing in \cref{sec:method-objective} questions
+whether $\Rp$ is the right target at all.
+
+\paragraph{Difficulty coordinate.}
+We require a notion of state difficulty that does not depend on the surrogate being evaluated (else
+measurement is circular). We use \emph{model-independent} coordinates---total variation
+$\mathrm{TV}(\state)=\sum_i|\state_{i+1}-\state_i|$ (sharpness), the target amplitude
+$\mathrm{RMS}(\sol(\state))$ (relative-error hardness), and distance to the attractor manifold (for
+off-manifold tubes)---to \emph{define held-out evaluation sets}, and the surrogate's own loss or ensemble
+disagreement only to \emph{drive the generator} (\cref{sec:method-gen}).
+
+\paragraph{Autoregressive rollout.}
+Given $\hat\state_0=\state_0$, the rollout is $\hat\state_{k+1}=\surr(\hat\state_k)$ with ground truth
+$\state_{k+1}=\sol(\state_k)$; let $e_k=\hat\state_k-\state_k$. Let $L_{\sol}$ be a Lipschitz constant of
+the true solver on the relevant region. Adding and subtracting $\sol(\hat\state_k)$,
+\begin{align}
+  e_{k+1}
+  &= \surr(\hat\state_k)-\sol(\state_k)
+   = \underbrace{\bigl[\surr(\hat\state_k)-\sol(\hat\state_k)\bigr]}_{\text{surrogate error at }\hat\state_k}
+   + \underbrace{\bigl[\sol(\hat\state_k)-\sol(\state_k)\bigr]}_{\text{true-solver sensitivity}},
+   \notag\\[-1pt]
+  \|e_{k+1}\| &\le \lossf^{1/2}(\hat\state_k) + L_{\sol}\,\|e_k\|.
+  \label{eq:rollout-recursion}
+\end{align}
+The crux---developed in \cref{sec:method-rollout}---is that $\lossf$ is evaluated at the \emph{visited}
+state $\hat\state_k=\state_k+e_k$, which departs from the trajectory manifold as $\|e_k\|$ grows.
+
+% =====================================================================
+\section{Method}\label{sec:method}
+% =====================================================================
+We argue that coverage, not $\pnat$-average risk, is the right objective and that uniform validation
+cannot measure it (\cref{sec:method-objective}); show that the mixture \eqref{eq:mixture} makes coverage
+\emph{safe} with an explicit certificate (\cref{sec:method-mixture}); connect coverage to rollout
+stability (\cref{sec:method-rollout}); and finally specify the generator, the difficulty signal, and the
+training loop (\cref{sec:method-gen}). All proofs are in \cref{app:proofs}.
+
+\subsection{From average risk to coverage}\label{sec:method-objective}
+\paragraph{No free lunch on $\Rp$.}
+Let $w=\pnat/\qtr$ be the importance weights. Then $\Rp(\theta)=\E_{\qtr}[w\,\lossf]\le
+\|w\|_\infty\,\Rq(\theta)$, and $\|w\|_\infty$ diverges exactly when $\qtr$ undersamples a high-$\pnat$
+region (the bulk). For $\Lip$-Lipschitz loss, an integral-probability-metric bound (\cref{app:ipm})
+gives $|\Rp(\theta)-\Rq(\theta)|\le \Lip(\lossf)\,W_1(\pnat,\qtr)$, so pushing the generator harder
+(larger $W_1$) can only loosen any guarantee on the average. These are not vacuous worst cases: in
+\cref{app:nofreelunch} we exhibit a misspecified two-region problem in which minimizing loss on the rare
+hard region \emph{strictly increases} $\Rp$ by $\Omega(1)$. \emph{Hence helping the rare modes can hurt
+the $\pnat$-average---and uniform validation reports only the latter.}
+
+\paragraph{The right objective is coverage.}
+The pathology is in the \emph{objective}, not the method. A reusable surrogate should minimize a
+worst-case / coverage functional over $\manifold$ rather than a frequency-weighted average. Three
+related forms, from strongest to softest, are
+\begin{equation}
+  \Rinf(\theta)=\!\sup_{\state\in\manifold}\!\lossf(\state),
+  \quad
+  \Rdro(\theta)=\!\!\max_{\mathfrak{q}\in\mathcal{U}(\pnat)}\!\E_{\state\sim\mathfrak{q}}[\lossf(\state)],
+  \quad
+  \Rcov(\theta)=\E_{\state\sim\mu}[\lossf(\state)],
+  \label{eq:objectives}
+\end{equation}
+where $\mathcal{U}(\pnat)$ is an ambiguity ball around $\pnat$ and $\mu$ places equal mass on each
+difficulty quantile (uniform over difficulty, not over occupancy). $\Rdro$ is exactly the min--max our
+loop approximates: the surrogate is the outer minimizer, the difficulty-conditioned generator is the
+inner maximizer, and $\unif$ controls the ambiguity radius. Using the entropic (KL-ball) dual of
+$\Rdro$ we show in \cref{app:waterfilling} that its minimizer \emph{flattens the loss profile}: at the
+robust optimum the loss is equalized across the supported region. ``Uniformity over the loss'' is thus
+not a slogan but the optimality condition of coverage. Accordingly we report, beside accuracy, the
+\emph{inequality} of the per-state loss profile (e.g.\ $\sup/\mathrm{mean}$ and a Gini coefficient),
+which a coverage-improving method must reduce.
+
+\begin{remark}[Measurement follows the objective]\label{rem:measure}
+Because the hard modes have $\pnat$-measure $\approx 0$, no finite $\pnat$-sample contains them and $\Rp$
+is insensitive to them; uniform validation is the wrong yardstick for coverage. We therefore evaluate on
+(i) difficulty-stratified tails by a model-independent coordinate, (ii) a loss-uniform coverage set, and
+(iii) an off-manifold tube (\cref{sec:method-gen}), keeping uniform validation only as a control. This is
+not a convenience: \cref{app:nofreelunch} shows the sign of the effect can differ between $\Rp$ and these
+metrics.
+\end{remark}
+
+\subsection{The mixture gives a bounded covariate-shift penalty}\label{sec:method-mixture}
+Pure hard-state training ($\unif=0$) has unbounded $\|w\|_\infty$ and can arbitrarily damage the bulk.
+The mixture \eqref{eq:mixture} repairs this with a one-line but decisive bound.
+\begin{proposition}[Bounded mixture]\label{prop:mixture}
+Let $\qtr=\unif\,\pnat+(1-\unif)\,\qgen$ with $\unif\in(0,1]$ and $\qgen\ge 0$. For every $\theta$ and
+every nonnegative loss $\lossf$, $\ \Rp(\theta)\le \tfrac{1}{\unif}\,\Rq(\theta).$
+\end{proposition}
+Because $\qtr\ge\unif\,\pnat$ pointwise, the importance weight obeys $w=\pnat/\qtr\le 1/\unif$ everywhere;
+the bound then follows by taking the $\qtr$-expectation of $w\lossf\ge 0$ (full proof in
+\cref{app:mixture}). The consequence is conceptual: $\unif$ is not a tuning heuristic but a \emph{knob
+with a certificate}. It induces a \emph{bounded} Pareto front---$\unif\!\to\!0$ maximizes tail coverage
+with no bulk guarantee, $\unif\!=\!1$ recovers uniform training, and intermediate $\unif$ trades the two
+while guaranteeing the validation risk never exceeds $1/\unif$ times the (coverage-tilted) objective we
+actually minimize. An unbiased importance-weighted alternative removes the bias entirely at the price of
+variance $\propto\chi^2(\pnat\|\qgen)$ (\cref{app:iw}); the mixture is its variance-controlled, clipped
+counterpart, which is why we prefer it in practice.
+
+\subsection{Coverage of the tube yields rollout stability}\label{sec:method-rollout}
+We now connect coverage to the deployment-relevant quantity. The key realization from
+\eqref{eq:rollout-recursion} is that what matters is the surrogate's error on the states the rollout
+actually \emph{visits}, which lie in a tube
+$\tube=\{\state:\dist(\state,\manifold)\le\rho\}$ around the manifold rather than on $\manifold$ itself.
+\begin{assumption}[Tube coverage]\label{ass:tube}
+$\displaystyle\sup_{\state\in\tube}\lossf^{1/2}(\state)\le \bar\epsilon.$
+\end{assumption}
+\begin{assumption}[Contraction / invariance]\label{ass:inv}
+$L_{\sol}<1$ on $\tube$ and $\bar\epsilon\le(1-L_{\sol})\,\rho.$
+\end{assumption}
+\begin{proposition}[Trapping tube $\Rightarrow$ bounded rollout]\label{prop:tube}
+Suppose $\state_0\in\manifold$ and the true trajectory remains in $\manifold$.
+\emph{(a)} Under \cref{ass:tube,ass:inv}, $\hat\state_k\in\tube$ for all $k$ and
+$\ \|e_k\|\le \bar\epsilon/(1-L_{\sol})\ $ for all $k$ (bounded uniformly in the horizon).
+\emph{(b)} If instead $L_{\sol}>1$, then as long as $\hat\state_k\in\tube$,
+$\ \|e_k\|\le \bar\epsilon\,(L_{\sol}^k-1)/(L_{\sol}-1)$, so the stable horizon
+$K_\tau=\min\{k:\|e_k\|>\tau\}$ satisfies
+$\ K_\tau\ge \log\!\bigl(1+\tau(L_{\sol}-1)/\bar\epsilon\bigr)/\log L_{\sol}$,
+which increases as $\bar\epsilon$ decreases.
+\end{proposition}
+The proof (\cref{app:tube}) is a one-step invariance induction on \eqref{eq:rollout-recursion}: while
+$\|e_k\|\le\rho$ the visited state lies in $\tube$, so its error is at most $\bar\epsilon$, and
+$\bar\epsilon+L_{\sol}\rho\le\rho$ keeps the next error within $\rho$. The mathematical content is the
+\emph{precondition}, \cref{ass:tube}. A uniform-trained surrogate has small $\lossf$ on $\manifold$ but
+\emph{uncontrolled} $\lossf$ off it: modeling the off-manifold error as
+$\lossf^{1/2}(\hat\state_k)\le\epsilon_0+\gamma\,\dist(\hat\state_k,\manifold)\approx\epsilon_0+\gamma\|e_k\|$
+turns \eqref{eq:rollout-recursion} into $\|e_{k+1}\|\le\epsilon_0+(L_{\sol}+\gamma)\|e_k\|$, with
+effective rate $L_{\sol}+\gamma>L_{\sol}$---a positive feedback that ejects the rollout from any tube.
+This is exposure bias. Establishing \cref{ass:tube}---uniform error on the tube---is exactly what removes
+the $\gamma\|e_k\|$ term. A difficulty-targeting generator builds \cref{ass:tube} \emph{anticipatorily}:
+it synthesizes the off-manifold states a rollout would otherwise discover the hard way, an amortized,
+unroll-free analogue of DAgger \citep{ross2011dagger} (\cref{rem:dagger}). We test the precondition
+directly by measuring one-step error on perturbed off-manifold states as a function of $\rho$
+(\cref{sec:exp}).
+
+\begin{remark}[Anticipatory DAgger]\label{rem:dagger}
+Uniform trajectory training is behavior cloning on the expert (clean-trajectory) distribution, whose
+horizon-$H$ rollout error scales as $O(\epsilon H^2)$; DAgger removes the distribution mismatch by
+training on the \emph{visited} distribution, improving this to $O(\epsilon H)$ \citep{ross2011dagger}.
+Our generator approximates the visited distribution \emph{proactively}, covering the tube the rollout
+would explore without paying for repeated unrolls---a generative, amortized DAgger.
+\end{remark}
+
+\subsection{The generator, the difficulty signal, and the loop}\label{sec:method-gen}
+\paragraph{Difficulty-conditioned generator.}
+We train a conditional flow-matching model \citep{lipman2023flow} $g_\phi(\state\mid b,\param)$ over
+normalized fields, conditioned on a discrete \emph{difficulty bin} $b\in\{1,\dots,B\}$ and the physical
+parameters $\param$. Each round, the current pool's per-state difficulty is sorted into $B$
+equal-frequency quantile bins; a class-balanced sampler gives every bin equal weight during training so
+$g_\phi$ learns the full difficulty-conditional density rather than collapsing onto the (easy, abundant)
+mode. At generation time, a \emph{sampling law} $\pi$ over bins sets the aggressiveness of hard-targeting
+(e.g.\ uniform over the upper half, or a softmax tilt toward the hardest bins); parameters $\param$ are
+drawn from their prior, passed to $g_\phi$, and reused to label each synthesized state with its true next
+step $\sol(\state,\param)$ via one solver call. Conditioning on a \emph{bin} rather than a continuous
+loss target makes the control robust to the (round-varying) scale of the loss and lets us reason about
+coverage per difficulty level. Realism is monitored online (total variation, power spectrum, and
+amplitude statistics against held-out true states) to ensure $\mathrm{supp}(\qgen)$ stays in/near
+$\manifold$; states the solver maps to non-finite values are rejected.
+
+\paragraph{Difficulty signal: loss vs.\ epistemic disagreement.}
+The one-step loss conflates \emph{reducible} (epistemic) error---fixable with more data---with
+\emph{irreducible} error from misspecification on a chaotic system, which more data cannot remove and
+which a loss-targeting generator would chase uselessly. We therefore also consider the disagreement of a
+small surrogate ensemble, $\mathrm{Var}_m\,\surr^{(m)}(\state,\param)$, a query-by-committee /
+approximate-BALD signal \citep{houlsby2011bald,beluch2018ensembles} that isolates the reducible part. The
+two signals coincide where error is purely epistemic and diverge where it is aleatoric; we compare them
+in \cref{sec:exp}. Formal definitions are in \cref{app:difficulty}.
+
+\paragraph{Active-learning loop.}
+\Cref{alg:loop} is one round: build a mixed pool \eqref{eq:mixture}, retrain the surrogate ensemble,
+recompute difficulty, retrain the generator. Solver calls---the expensive resource---are spent on the
+transitions the loop judges most informative; the natural efficiency axis is therefore accuracy versus
+number of solver calls, against which we compare uniform-trajectory and i.i.d.-uniform-state baselines
+(\cref{sec:exp}, \cref{app:protocol}).
+
+\begin{algorithm}[t]
+\caption{One round of generative active learning (uniform fraction $\unif$, sampling law $\pi$, $B$ bins).}
+\label{alg:loop}
+\begin{algorithmic}[1]
+\State \textbf{Uniform part:} simulate $n_u=\lceil\unif N\rceil$ fresh uniform transitions with the solver.
+\State \textbf{Generated part:} draw bins $b\sim\pi$ and params $\param\sim$ prior; synthesize
+       $\state\sim g_\phi(\cdot\mid b,\param)$; label $\state'=\sol(\state,\param)$ ($N-n_u$ states).
+\State Form the mixed pool $\qtr=\unif\,\pnat+(1-\unif)\,\qgen$; retrain the surrogate ensemble $\{\surr^{(m)}\}$.
+\State Recompute per-state difficulty (one-step loss or ensemble disagreement); re-bin into $B$ quantiles.
+\State Retrain the difficulty-conditioned generator $g_\phi$ with a bin-balanced sampler.
+\end{algorithmic}
+\end{algorithm}
+
+% =====================================================================
+\section{Experimental Plan and Preliminary Evidence}\label{sec:exp}
+% =====================================================================
+\emph{This section states the protocol and reports preliminary, single-system evidence; a controlled
+multi-PDE study is the main item of ongoing work (\cref{sec:disc}).} Following \cref{rem:measure}, we
+evaluate on: \textbf{(a)} uniform validation (control, $\Rp$); \textbf{(b)} difficulty-stratified tails
+by model-independent coordinates (total variation; target amplitude); \textbf{(c)} a loss-uniform
+coverage set; \textbf{(d)} an off-manifold \emph{tube} set---attractor states perturbed by a structured
+field of magnitude $\rho\,\mathrm{RMS}(\state)$, then stepped through the true solver; and \textbf{(e)}
+rollout error and the stable horizon $K_\tau$. We summarize coverage by the loss-profile inequality
+($\sup/\mathrm{mean}$, Gini). Construction details and the solver-call efficiency axis are in
+\cref{app:protocol}.
+
+\paragraph{Protocol (the study in progress).}
+We instantiate \cref{alg:loop} on the 1D Kuramoto--Sivashinsky equation \citep{sivashinsky1977} with a
+\emph{fixed} per-round budget of $N$ transitions that is \emph{redistributed} rather than accumulated:
+each round draws a fresh pool of the same size, so a given round corresponds to a fixed number of solver
+calls and ``round'' is a direct proxy for the solver-call efficiency axis of \cref{sec:method-gen}. This
+isolates the quantity of interest---how a fixed labeling budget is \emph{allocated} between attractor-bulk
+and hard states---from the confound of simply labeling more data. The surrogate is a small convolutional
+ensemble ($M{=}3$); the generator is a difficulty-conditioned flow-matching model over $B{=}20$ quantile
+bins with a top-half sampling law $\pi$. We sweep the uniform fraction $\unif\in\{0,0.25,0.5,0.75\}$ and
+include two controls: a pure uniform-trajectory baseline ($\unif{=}1$ with the generator disabled), which
+recovers classical pool-based active learning and instantiates $\Rp$-style training; and an ablation that
+replaces the one-step-loss difficulty signal by ensemble disagreement at $\unif{=}0.5$
+(\cref{sec:method-gen}). Each configuration is repeated over five seeds and evaluated at a matched round on
+the suite (a)--(e); because the per-round budget is fixed, this is a matched-solver-call comparison, and
+the $\unif$-sweep traces the bounded Pareto front predicted by \cref{prop:mixture}.
+
+\paragraph{Preliminary observation (Kuramoto--Sivashinsky).}
+On the 1D Kuramoto--Sivashinsky equation \citep{sivashinsky1977}, a chaotic testbed, the qualitative
+picture predicted by the theory holds in our preliminary runs: relative to a uniform-trajectory baseline
+the method leaves attractor-bulk one-step error essentially unchanged (a small regression), while error
+on the off-manifold tube drops substantially and, consistent with \cref{prop:tube}, the \emph{gap widens
+as $\rho$ grows}---the regime where exposure bias is most damaging. We deliberately refrain from
+headline numbers here: the experiments are single-system and exploratory, the architecture and budget are
+not yet tuned for a fair multi-baseline comparison, and the direct rollout-horizon ($K_\tau$) study is in
+progress. We view the present contribution as the framework and its guarantees, with this evidence as a
+consistency check rather than a validation.
+
+% =====================================================================
+\section{Discussion, Limitations, and Future Work}\label{sec:disc}
+% =====================================================================
+The theory is deliberately conditional: \cref{prop:mixture} assumes only nonnegativity, but
+\cref{prop:tube} relies on tube coverage (\cref{ass:tube}) and on a benign local Lipschitz regime
+(\cref{ass:inv}); in fully chaotic regions only the slower-divergence statement \cref{prop:tube}(b)
+applies. The coverage objective is only as good as the generator's realism: if $\qgen$ escapes
+$\manifold$, one minimizes a worst case over an inflated set, which is why we monitor realism online.
+Empirically, the present study is single-PDE and exploratory; a credible empirical contribution requires
+(i) the solver-call efficiency curves against i.i.d.-uniform-state and pool-based AL baselines, (ii) the
+$K_\tau$ rollout-horizon test that \cref{prop:tube} predicts, (iii) the $\unif$-sweep tracing the bounded
+Pareto front of \cref{prop:mixture}, and (iv) generalization across 1D PDEs (e.g.\ Burgers,
+reaction--diffusion) and at least one 2D system. We regard these as the natural next steps rather than
+as gaps in the conceptual and theoretical contribution presented here.
+
+% =====================================================================
+\appendix
+\section{Proofs and Details}\label{app:proofs}
+
+\subsection{A misspecified example where hard-mining increases $\Rp$}\label{app:nofreelunch}
+Consider a one-parameter surrogate $\theta\in\R$ and two state regions: a \emph{bulk} $B$ with
+$\pnat(B)=1-\delta$ and a \emph{hard} region $H$ with $\pnat(H)=\delta$, $\delta\in(0,\tfrac12)$. Suppose
+the per-region losses are quadratic with distinct minimizers,
+$\ell_B(\theta)=(\theta-\theta_B^\star)^2$ and $\ell_H(\theta)=(\theta-\theta_H^\star)^2$, with
+$|\theta_B^\star-\theta_H^\star|=\Delta>0$ (misspecification: no $\theta$ is optimal in both regions).
+Then
+\begin{equation}
+  \Rp(\theta)=(1-\delta)\,(\theta-\theta_B^\star)^2+\delta\,(\theta-\theta_H^\star)^2,
+\end{equation}
+minimized at $\theta_\pnat^\star=(1-\delta)\theta_B^\star+\delta\theta_H^\star$, i.e.\ weighted by the
+\emph{occupancy} $\pnat$. Pure hard-mining ($\unif=0$, $\qgen$ supported on $H$) minimizes $\ell_H$ and
+returns $\theta_H^\star$. Comparing to the $\pnat$-best bulk-aligned solution $\theta_B^\star$,
+\begin{equation}
+  \Rp(\theta_H^\star)-\Rp(\theta_B^\star)
+  = (1-\delta)\Delta^2 - \delta\Delta^2 = (1-2\delta)\,\Delta^2 \;>\;0
+  \quad\text{for }\delta<\tfrac12 .
+\end{equation}
+Thus hard-mining \emph{strictly increases} the natural-distribution risk by $\Omega(\Delta^2)$, while it
+\emph{decreases} the hard-region risk from $\delta\Delta^2$ to $0$. The two metrics move in opposite
+directions, establishing both the no-free-lunch claim of \cref{sec:method-objective} and the necessity of
+difficulty-stratified evaluation (\cref{rem:measure}). Finally, the mixture
+$\qtr=\unif\,\pnat+(1-\unif)\,\mathbf{1}_H/\pnat(H)$ minimizes a convex combination whose optimizer
+interpolates between $\theta_\pnat^\star$ and $\theta_H^\star$, recovering bulk protection as
+$\unif\to1$, consistent with \cref{prop:mixture}. $\hfill\square$
+
+\subsection{Covariate-shift bounds}\label{app:ipm}
+For nonnegative $\lossf$ and $\qtr$ with $\mathrm{supp}(\pnat)\subseteq\mathrm{supp}(\qtr)$,
+\[
+  \Rp(\theta)=\int \pnat\,\lossf=\int \qtr\,\frac{\pnat}{\qtr}\,\lossf
+  \le \Big\|\tfrac{\pnat}{\qtr}\Big\|_\infty \Rq(\theta)\qquad(\text{H\"older}).
+\]
+If $\lossf$ is $\Lip$-Lipschitz, then by Kantorovich--Rubinstein duality
+$|\Rp-\Rq|=\big|\int \lossf\,d(\pnat-\qtr)\big|\le \Lip(\lossf)\,W_1(\pnat,\qtr)$. If $\lossf\le B$
+pointwise, then $|\Rp-\Rq|\le B\,\mathrm{TV}(\pnat,\qtr)\le B\sqrt{\tfrac12\mathrm{KL}(\pnat\|\qtr)}$ by
+the definition of total variation and Pinsker's inequality. Each bound degrades as $\qtr$ moves away from
+$\pnat$, formalizing the trade-off in \cref{sec:method-objective}. $\hfill\square$
+
+\subsection{Proof of \cref{prop:mixture}}\label{app:mixture}
+Since $\qgen\ge0$ and $\unif\in(0,1]$, for every $\state$ with $\pnat(\state)>0$ we have
+$\qtr(\state)=\unif\,\pnat(\state)+(1-\unif)\,\qgen(\state)\ge \unif\,\pnat(\state)>0$, hence
+$w(\state)=\pnat(\state)/\qtr(\state)\le 1/\unif$. As $\lossf\ge0$,
+\[
+  \Rp(\theta)=\E_{\state\sim\qtr}\!\big[w(\state)\lossf(\state)\big]
+  \le \tfrac1\unif\,\E_{\state\sim\qtr}[\lossf(\state)]=\tfrac1\unif\Rq(\theta).
+\]
+The constant $1/\unif$ is tight: take $\qgen$ disjoint from a $\pnat$-atom to attain $w=1/\unif$ there.
+$\hfill\square$
+
+\subsection{Entropic DRO dual and loss-flattening}\label{app:waterfilling}
+Take the KL ambiguity set $\mathcal{U}(\pnat)=\{\mathfrak q:\mathrm{KL}(\mathfrak q\|\pnat)\le\varepsilon\}$.
+The inner maximization in $\Rdro$ has the standard entropic (Donsker--Varadhan) form: for dual
+temperature $\eta>0$,
+\[
+  \max_{\mathfrak q\ll\pnat}\Big\{\E_{\mathfrak q}[\lossf]-\eta\,\mathrm{KL}(\mathfrak q\|\pnat)\Big\}
+  =\eta\,\log\E_{\pnat}\!\big[e^{\lossf/\eta}\big],
+  \qquad
+  \mathfrak q^\star(\state)\propto \pnat(\state)\,e^{\lossf(\state)/\eta},
+\]
+so the worst-case distribution \emph{tilts mass toward high-loss states}; as $\varepsilon\!\uparrow$
+(equivalently $\eta\!\downarrow0$), $\Rdro\to\mathrm{ess\,sup}\,\lossf=\Rinf$. Minimizing the certainty
+equivalent $\eta\log\E_{\pnat}[e^{\lossf/\eta}]$ over $\theta$ penalizes the upper tail of the loss
+exponentially; at a stationary point the gradient $\E_{\mathfrak q^\star}[\nabla_\theta\lossf]=0$ is an
+$\mathfrak q^\star$-weighted average concentrated on high-loss states, so descent directions that lower
+the peaks while raising the valleys are favored until the profile is \emph{flat} on the active (high-loss)
+set. In the limit $\eta\to0$, $\min_\theta\Rinf$ is the Chebyshev problem whose optimum equioscillates:
+the maximal losses are equalized. This is the precise sense of ``uniformity over the loss''. $\hfill\square$
+
+\subsection{Importance-weighted estimator and its variance}\label{app:iw}
+With $\state_i\stackrel{\text{iid}}\sim\qgen$ and $w=\pnat/\qgen$, the estimator
+$\widehat{\Rp}=\frac1n\sum_i w(\state_i)\lossf(\state_i)$ is unbiased:
+$\E_{\qgen}[w\lossf]=\int\qgen\frac{\pnat}{\qgen}\lossf=\Rp$. Its variance is
+\[
+  \mathrm{Var}(\widehat{\Rp})=\tfrac1n\Big(\E_{\qgen}[w^2\lossf^2]-\Rp^2\Big)
+  \le \tfrac1n\,\|\lossf\|_\infty^2\,\E_{\qgen}[w^2]
+  = \tfrac1n\,\|\lossf\|_\infty^2\big(\chi^2(\pnat\|\qgen)+1\big),
+\]
+using $\E_{\qgen}[w^2]=\int \pnat^2/\qgen=\chi^2(\pnat\|\qgen)+1$. Thus exact debiasing costs variance
+that grows with how far $\qgen$ strays from $\pnat$. The mixture \eqref{eq:mixture} caps $w\le1/\unif$
+(\cref{app:mixture}), i.e.\ it is the clipped/self-normalized variant with variance bounded by
+$\|\lossf\|_\infty^2/(n\,\unif^2)$, trading a controlled bias for bounded variance. $\hfill\square$
+
+\subsection{Proof of \cref{prop:tube}}\label{app:tube}
+Since the true trajectory stays in $\manifold$, $\dist(\hat\state_k,\manifold)\le\|\hat\state_k-\state_k\|=\|e_k\|$,
+so $\|e_k\|\le\rho\Rightarrow\hat\state_k\in\tube$.
+
+\emph{(a) Contractive case.} We show $\|e_k\|\le\rho$ for all $k$ by induction. Base: $e_0=0$. Step:
+assume $\|e_k\|\le\rho$, hence $\hat\state_k\in\tube$ and $\lossf^{1/2}(\hat\state_k)\le\bar\epsilon$ by
+\cref{ass:tube}. Then by \eqref{eq:rollout-recursion},
+$\|e_{k+1}\|\le\bar\epsilon+L_{\sol}\|e_k\|\le\bar\epsilon+L_{\sol}\rho\le(1-L_{\sol})\rho+L_{\sol}\rho=\rho$,
+using \cref{ass:inv}. So $\hat\state_k\in\tube$ for all $k$ and the scalar recursion
+$x_{k+1}=\bar\epsilon+L_{\sol}x_k$, $x_0=0$, dominates $\|e_k\|$. As $L_{\sol}<1$, $x_k$ is increasing and
+bounded by its fixed point $\bar\epsilon/(1-L_{\sol})$, giving $\|e_k\|\le\bar\epsilon/(1-L_{\sol})$ for
+all $k$.
+
+\emph{(b) Chaotic case ($L_{\sol}>1$).} While $\hat\state_k\in\tube$, \cref{ass:tube} still gives
+$\|e_{k+1}\|\le\bar\epsilon+L_{\sol}\|e_k\|$, so $\|e_k\|\le\bar\epsilon\sum_{j=0}^{k-1}L_{\sol}^j
+=\bar\epsilon\,(L_{\sol}^k-1)/(L_{\sol}-1)$. Setting the right-hand side equal to $\tau$ and solving for
+$k$ gives the stated $K_\tau=\log(1+\tau(L_{\sol}-1)/\bar\epsilon)/\log L_{\sol}$, which is decreasing in
+$\bar\epsilon$; hence reducing the tube error $\bar\epsilon$ (better coverage) lengthens the stable
+horizon. For comparison, a surrogate with uncovered tube has effective rate $L_{\sol}+\gamma$ in place of
+$L_{\sol}$ (main text), giving a strictly shorter horizon
+$\log(1+\tau(L_{\sol}+\gamma-1)/\epsilon_0)/\log(L_{\sol}+\gamma)$. $\hfill\square$
+
+\subsection{Difficulty signals and generator details}\label{app:difficulty}
+\textbf{Quantile binning.} Given pool difficulties $\{d_i\}$ (one-step loss or ensemble variance), let
+$0=\tau_0<\tau_1<\dots<\tau_B$ be the empirical $\{j/B\}_{j=0}^B$ quantiles; bin $b_i=\#\{j:\tau_j\le d_i\}$.
+A class-balanced sampler draws each bin with probability $1/B$ during generator training so all difficulty
+levels contribute equally. \textbf{Sampling laws.} At generation, $\pi$ over $\{1,\dots,B\}$ is one of:
+uniform; upper-half ($b\sim\mathrm{Unif}\{B/2{+}1,\dots,B\}$); top-$k$; or a softmax tilt
+$\pi(b)\propto e^{\beta b}$. \textbf{Ensemble disagreement.} With members $\{\surr^{(m)}\}_{m=1}^{M}$,
+$d^{\mathrm{ens}}(\state,\param)=\frac1L\sum_{i}\mathrm{Var}_m\,\surr^{(m)}_i(\state,\param)$, the mean
+per-coordinate variance, an approximate-BALD acquisition \citep{houlsby2011bald,beluch2018ensembles}. It
+falls back to the loss signal when $M=1$.
+
+\subsection{Evaluation sets and the efficiency axis}\label{app:protocol}
+\textbf{Difficulty-stratified tails.} From a large bank of uniform trajectories, rank transitions by a
+model-independent coordinate (total variation of $\state$, or target amplitude $\mathrm{RMS}(\sol(\state))$)
+and retain the top quantile. \textbf{Loss-uniform coverage set.} Resample the bank to place equal mass in
+each difficulty-coordinate bin (uniform over difficulty, not occupancy), realizing $\mu$ in
+\eqref{eq:objectives}. \textbf{Off-manifold tube.} For attractor states $\state$, add a structured
+low-wavenumber field $\xi$ normalized so $\|\xi\|=\rho\,\mathrm{RMS}(\state)$, and step $\state+\xi$
+through the true solver to obtain the target; sweeping $\rho$ probes the tube radius of
+\cref{prop:tube}. \textbf{Efficiency axis.} Since both uniform and generated transitions cost one solver
+call each, the fair comparison is accuracy versus cumulative solver calls; baselines are uniform
+trajectories, i.i.d.\ uniform states (decorrelated but on-manifold), and pool-based AL.
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\end{document}
