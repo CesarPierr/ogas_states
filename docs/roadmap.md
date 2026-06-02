@@ -2,7 +2,7 @@
 
 > **Objectif :** un papier A* (NeurIPS / ICML / ICLR). Ce document agrège **toutes** les idées
 > accumulées, les ordonne en une thèse unique, et définit un plan d'exécution par phases avec
-> jalons go/no-go pour ne pas se disperser. Théorie détaillée : [theory.md](theory.md).
+> jalons go/no-go pour ne pas se disperser. Théorie détaillée : `paper/main.tex` §4 + annexe A.
 
 ---
 
@@ -16,12 +16,12 @@
 > **garantie de stabilité du rollout** via la couverture du tube (anti-exposure-bias).*
 
 Trois piliers, chacun = une contribution :
-1. **Reformulation** : objectif coverage/DRO + « uniformité sur la loss » ([theory.md §7](theory.md)).
+1. **Reformulation** : objectif coverage/DRO + « uniformité sur la loss » (`paper/main.tex` §4.1).
 2. **Garantie rollout** : couverture du tube ⇒ invariance avant ⇒ rollout borné / horizon
-   allongé ; « DAgger anticipé » par modèle génératif ([theory.md §9](theory.md)).
+   allongé ; « DAgger anticipé » par modèle génératif (`paper/main.tex` §4.3).
 3. **Méthode + mesure** : générateur conditionné par difficulté (bins de quantile, lois de
-   sampling), `uniform_fraction` = rayon DRO borné (`R_p ≤ R_q/α`, [§3.1](theory.md)), signal
-   = désaccord d'ensemble ([§3.3](theory.md)), **validation dure/non-vue** ([§8](theory.md)).
+   sampling), `uniform_fraction` = rayon DRO borné (`R_p ≤ R_q/α`, `paper/main.tex` §4.2), signal
+   = désaccord d'ensemble (`paper/main.tex` §4.4), **validation dure/non-vue** (`paper/main.tex` §7).
 
 ---
 
@@ -49,7 +49,7 @@ Légende : ✅ fait · 🟡 partiel · 🔲 à faire · ❌ écarté (à documen
 ## 2. Découpage en phases (avec jalons go/no-go)
 
 ### Phase 0 — Cadrage théorique  *(fait)*
-- [theory.md](theory.md) §1–§9 : covariate-shift, borne de mélange, fonctionnelle rollout,
+- `paper/main.tex` §4 + annexe A : covariate-shift, borne de mélange, fonctionnelle rollout,
   reformulation coverage/DRO, validation, tube-invariance.
 - **Livrable :** énoncés + 2 propositions (borne `R_p≤R_q/α` ; tube piégeant ⇒ rollout borné).
 

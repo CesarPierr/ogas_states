@@ -1,6 +1,6 @@
 # Reading list — foundations behind the theory & proofs
 
-Mapped to the components of [theory.md](theory.md) and the proofs in `paper/main.tex` (App. A).
+Mapped to the theory and proofs in `paper/main.tex` (§4 + App. A).
 Markers: ⭐ start here (accessible, high payoff) · 📘 textbook/notes · 📄 key paper · 🆓 free online.
 
 ---
