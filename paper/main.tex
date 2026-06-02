@@ -28,13 +28,20 @@
 \usepackage{algpseudocode}
 
 \theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
 \newtheorem{proposition}{Proposition}
 \newtheorem{lemma}{Lemma}
 \newtheorem{corollary}{Corollary}
 \theoremstyle{definition}
 \newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
 \theoremstyle{remark}
 \newtheorem{remark}{Remark}
+
+\DeclareMathOperator{\CVaR}{CVaR}
+\DeclareMathOperator*{\essup}{ess\,sup}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\supp}{supp}
 
 % ---- notation macros ----
 \newcommand{\R}{\mathbb{R}}
@@ -321,6 +328,29 @@ not a slogan but the optimality condition of coverage. Accordingly we report, be
 \emph{inequality} of the per-state loss profile (e.g.\ $\sup/\mathrm{mean}$ and a Gini coefficient),
 which a coverage-improving method must reduce.
 
+The following elementary observation is the organizing principle of the paper: a single
+\emph{uniform} (sup-norm) certificate on a region implies \emph{every} downstream guarantee at once.
+\begin{theorem}[Coverage is a sufficient certificate]\label{thm:coverage}
+Let $S\subseteq\R^L$ be measurable with $\supp(\pnat)\subseteq S$, and suppose the surrogate satisfies the
+uniform certificate $\;\sup_{\state\in S}\lossf(\state)\le\bar\epsilon^{2}$. Then:
+\begin{enumerate}[label=(\roman*),leftmargin=2.2em,topsep=2pt,itemsep=1pt]
+\item $\Rp(\theta)\le\bar\epsilon^{2}$ and $\Rcov(\theta)\le\bar\epsilon^{2}$; if moreover $\manifold\subseteq S$ then $\Rinf(\theta)\le\bar\epsilon^{2}$;
+\item $\Rdro(\theta)\le\bar\epsilon^{2}$ for \emph{every} ambiguity set $\mathcal U(\pnat)$ whose members are supported in $S$ (KL-, $\chi^2$-, Wasserstein-, or CVaR-type alike);
+\item if in addition $\tube\subseteq S$ and \cref{ass:inv} holds with this $\bar\epsilon$, then the autoregressive rollout stays trapped, $\|e_k\|\le\bar\epsilon/(1-L_{\sol})$ for all $k$ (\cref{prop:tube}).
+\end{enumerate}
+Conversely, $\sup_{S}\lossf$ is not a $\pnat$-average functional: no estimator built from a finite
+$\pnat$-sample can certify (i)--(iii) (\cref{rem:measure,app:nofreelunch}).
+\end{theorem}
+Parts (i)--(ii) are immediate from $\lossf\ge0$ and monotonicity ($\E_\nu[\lossf]\le\sup_S\lossf$ for any
+$\nu$ supported in $S$); (iii) is \cref{prop:tube}(a) with $\bar\epsilon$ the tube-coverage level. The
+theorem reframes the entire method: \emph{the goal is a small $\bar\epsilon$ on the reachable-plus-tube
+region $S$, not a small $\pnat$-average}. The two halves of the paper supply the two things this requires
+that uniform sampling does not: a \emph{training} mechanism that drives $\sup_S\lossf$ down (the
+coverage/DRO objective and the generator, \crefrange{sec:method-mixture}{sec:method-gen}) and a
+\emph{measurement} that tracks it (difficulty-stratified and tube evaluation, \cref{rem:measure}). The
+quantity $\bar\epsilon$ recurs as the tube-coverage level in \cref{prop:tube} and as the fixed point of
+the loop in \cref{prop:selfconsistency}.
+
 \begin{remark}[Measurement follows the objective]\label{rem:measure}
 Because the hard modes have $\pnat$-measure $\approx 0$, no finite $\pnat$-sample contains them and $\Rp$
 is insensitive to them; uniform validation is the wrong yardstick for coverage. We therefore evaluate on
@@ -347,14 +377,75 @@ actually minimize. An unbiased importance-weighted alternative removes the bias 
 variance $\propto\chi^2(\pnat\|\qgen)$ (\cref{app:iw}); the mixture is its variance-controlled, clipped
 counterpart, which is why we prefer it in practice.
 
+The ``bounded Pareto front'' can be made exactly quantitative in the two-region model of
+\cref{app:nofreelunch}, where it turns out to be a \emph{straight line}.
+\begin{corollary}[Linear coverage--bulk front and an $\unif$-rule]\label{cor:pareto}
+In the two-region model of \cref{app:nofreelunch} with hard generator $\qgen=\mathbf 1_H/\pnat(H)$, let
+$\theta(\unif)$ minimize $\Rq$ for $\qtr=\unif\pnat+(1-\unif)\qgen$, and let $\theta_\pnat^\star$ be the
+$\pnat$-optimum. Then the bulk excess risk and the hard-region risk are
+\[
+  \Rp(\theta(\unif))-\Rp(\theta_\pnat^\star)=(1-\delta)^2(1-\unif)^2\Delta^2,\qquad
+  R_H(\theta(\unif))=(1-\delta)^2\unif^2\Delta^2,
+\]
+so that, in root-mean-square units,
+$\ \sqrt{\Rp(\theta(\unif))-\Rp(\theta_\pnat^\star)}+\sqrt{R_H(\theta(\unif))}=(1-\delta)|\Delta|$ for all
+$\unif\in[0,1]$. The attainable (RMS bulk-excess, RMS hard-error) pairs therefore lie on a segment of
+slope $-1$: coverage is bought one-for-one in bulk RMS, and $\unif$ is the position along it. To cap the
+bulk RMS-degradation at a tolerance $\sqrt{t}$ it suffices to take
+$\ \unif\ge 1-\sqrt{t}\,/\,\bigl((1-\delta)|\Delta|\bigr)$.
+\end{corollary}
+This converts \cref{prop:mixture}'s qualitative ``bounded interpolation'' into a design rule: the bulk
+cost of any target coverage level is known in closed form, and \cref{cor:pareto} gives the smallest
+$1-\unif$ (most aggressive hard-mining) consistent with a stated bulk budget. The proof
+(\cref{app:pareto}) is an exact minimization; the same one-for-one RMS trade-off holds to leading order
+around $\theta_\pnat^\star$ for any smooth two-mode misspecification.
+
 \subsection{Coverage of the tube yields rollout stability}\label{sec:method-rollout}
-We now connect coverage to the deployment-relevant quantity. The key realization from
-\eqref{eq:rollout-recursion} is that what matters is the surrogate's error on the states the rollout
-actually \emph{visits}, which lie in a tube
-$\tube=\{\state:\dist(\state,\manifold)\le\rho\}$ around the manifold rather than on $\manifold$ itself.
+We connect coverage to the deployment quantity, the autoregressive rollout, \emph{without} assuming the
+dynamics contract---that would be false for a chaotic system. Iterating the exact recursion
+\eqref{eq:rollout-recursion} isolates a single system-dependent factor. Write $L_i$ for the \emph{local}
+amplification $\|D\sol\|$ at the visited state $\hat\state_i$ (here and below $\|\cdot\|$ may be any norm or
+Riemannian metric, not necessarily Euclidean---see (G2)), and let the rollout visit the tube
+$\tube=\{\state:\dist(\state,\manifold)\le\rho\}$.
 \begin{assumption}[Tube coverage]\label{ass:tube}
 $\displaystyle\sup_{\state\in\tube}\lossf^{1/2}(\state)\le \bar\epsilon.$
 \end{assumption}
+\begin{proposition}[General rollout bound]\label{prop:gronwall}
+With the finite-time amplification $A_{j\to k}=\prod_{i=j+1}^{k-1}L_i$ (empty product $=1$),
+$\ \|e_k\|\le\sum_{j=0}^{k-1}\lossf^{1/2}(\hat\state_j)\,A_{j\to k}$. Under \cref{ass:tube} this factorizes:
+\[
+  \|e_k\|\ \le\ \underbrace{\bar\epsilon}_{\text{coverage (our lever)}}\;\cdot\;
+  \underbrace{\textstyle\sum_{j<k}A_{j\to k}}_{\text{dynamical conditioning (the system)}}.
+\]
+\end{proposition}
+The two factors are \emph{independent}: $\bar\epsilon$ is what coverage controls---the only thing our method
+changes---while $\sum_j A_{j\to k}$ is a property of the system along the visited path. \emph{Lowering
+$\bar\epsilon$ therefore helps in every regime;} only the growth of the amplification sum differs, and we
+read it off a menu of structural hypotheses, none requiring global contraction (proofs and caveats in
+\cref{app:regimes}):
+\begin{itemize}[leftmargin=1.6em,topsep=2pt,itemsep=2pt]
+\item \textbf{(G0) Dissipativity $\Rightarrow$ no blow-up.} A robust energy/Lyapunov inequality
+$V(\sol\,\state)\le(1-c)V(\state)+b$ traps the rollout in an absorbing ball whatever the internal chaos, with
+$\bar\epsilon$ bounding the stray (input-to-state stability \citep{sontag2008iss}). The weakest and most
+universal guarantee---and blow-up is the dominant practical failure of PDE surrogates.
+\item \textbf{(G1) Robust invariance.} Viewing the surrogate as the true map plus a disturbance of size
+$\bar\epsilon$, any set with $\sol(S)\oplus B(\bar\epsilon)\subseteq S$ traps the rollout for all time---a
+barrier certificate, no contraction, computable by reachability/sum-of-squares.
+\item \textbf{(G2) Contraction in a metric.} If $L_i\le\rho_c<1$ in some norm or Riemannian metric
+(a negative log-norm $\mu(D\sol)<0$; possible even when $\|D\sol\|_2>1$, for \emph{non-normal} operators or
+\emph{transverse} to a chaotic attractor \citep{lohmiller1998contraction}), then
+$\sum_jA_{j\to k}\le 1/(1-\rho_c)$ and \cref{prop:tube} gives a horizon-uniform tube. For dissipative PDEs
+this is the transverse contraction onto the inertial manifold \citep{foias1988inertial,temam1997infinite}.
+\item \textbf{(G3) Mixing $\Rightarrow$ statistical fidelity.} A spectral gap of the transfer
+(Perron--Frobenius) operator---exponential decay of correlations---gives, by linear response,
+$\|\nu_\theta-\mu\|\lesssim\bar\epsilon/\mathrm{gap}$ between the surrogate's and the true invariant
+measures: correct long-term \emph{statistics} despite pointwise decorrelation (with the caveat that linear
+response can fail under non-uniform hyperbolicity \citep{baladi2014linear}).
+\item \textbf{(G4) Shadowing.} Under (partial) hyperbolicity, a rollout with one-step error $\le\bar\epsilon$
+on the visited tube is shadowed by a \emph{true} trajectory \citep{bowen1975equilibrium}, hence remains a
+physically valid solution (finite-time shadowing suffices in practice \citep{wang2014lss}).
+\end{itemize}
+The contraction case (G2) is sharpest but least general; we now make it precise.
 \begin{assumption}[Contraction / invariance]\label{ass:inv}
 $L_{\sol}<1$ on $\tube$ and $\bar\epsilon\le(1-L_{\sol})\,\rho.$
 \end{assumption}
@@ -381,7 +472,46 @@ the $\gamma\|e_k\|$ term. A difficulty-targeting generator builds \cref{ass:tube
 it synthesizes the off-manifold states a rollout would otherwise discover the hard way, an amortized,
 unroll-free analogue of DAgger \citep{ross2011dagger} (\cref{rem:dagger}). We test the precondition
 directly by measuring one-step error on perturbed off-manifold states as a function of $\rho$
-(\cref{sec:exp}).
+(\cref{sec:exp}). We now state the mechanism precisely.
+\begin{assumption}[Off-manifold error growth]\label{ass:offman}
+There exist $\epsilon_0\ge0$ and a growth rate $\gamma\ge0$ such that
+$\lossf^{1/2}(\state)\le\epsilon_0+\gamma\,\dist(\state,\manifold)$ for all $\state\in\tube$.
+\end{assumption}
+Every surrogate satisfies \cref{ass:offman} for \emph{some} $(\epsilon_0,\gamma)$; what differs is $\gamma$.
+On-manifold (uniform) training controls $\epsilon_0$ but leaves $\gamma$ free, whereas tube coverage
+(\cref{ass:tube}) is precisely the statement $\gamma\!\approx\!0$ with $\epsilon_0=\bar\epsilon$.
+\begin{proposition}[Exposure-bias amplification]\label{prop:exposure}
+Under \cref{ass:offman}, while $\hat\state_k\in\tube$ the rollout obeys
+$\|e_{k+1}\|\le\epsilon_0+(L_{\sol}+\gamma)\|e_k\|$: the effective amplification rate is inflated from
+$L_{\sol}$ to $L_{\sol}+\gamma$. Hence (a) if $L_{\sol}+\gamma<1$ the error is bounded by
+$\epsilon_0/(1-L_{\sol}-\gamma)$; (b) if $L_{\sol}+\gamma>1$ the stable horizon is
+$K_\tau\ge\log\!\bigl(1+\tau(L_{\sol}+\gamma-1)/\epsilon_0\bigr)/\log(L_{\sol}+\gamma)$, strictly shorter
+than the tube-covered ($\gamma=0$) horizon of \cref{prop:tube}(b). Coverage is the limit
+$\gamma\!\to\!0,\ \epsilon_0\!\to\!\bar\epsilon$, which removes the positive feedback.
+\end{proposition}
+
+This invites a question the clean-trajectory viewpoint cannot pose: \emph{which} tube should the generator
+cover? The rollout of an $\bar\epsilon$-accurate surrogate is itself trapped in a tube of radius
+$\bar\epsilon/(1-L_{\sol})$ (\cref{prop:tube}a), so the states worth covering are exactly those the current
+surrogate would visit---a moving target that shrinks as the surrogate improves. Closing this loop yields a
+fixed point.
+\begin{proposition}[Self-consistent trapping radius]\label{prop:selfconsistency}
+Assume contraction in a metric on the tube (\cref{ass:inv}, rate $\rho_c<1$---read \emph{transversally} to
+the attractor for a chaotic system, so $\rho$ and $e_k$ denote distance to the manifold $\dist(\cdot,\manifold)$,
+not distance to a trajectory) and that training to cover $\tube$ to uniform one-step accuracy attains tube
+error $\bar\epsilon=\mathcal E(\rho)$ for a nondecreasing $\mathcal E:[0,\rho_{\max}]\to\R_{\ge0}$ (a larger
+tube is no easier to cover at fixed budget). Let $g(\rho)=\mathcal E(\rho)/(1-\rho_c)$ be the transverse
+trapping radius induced by the resulting surrogate (\cref{prop:tube}a). If $g$ maps $[0,\rho_{\max}]$ into
+itself and $\mathrm{Lip}(g)<1$, then the round iteration $\rho_{t+1}=g(\rho_t)$ converges to a unique fixed
+point $\rho^\star=\mathcal E(\rho^\star)/(1-\rho_c)$, at which the rollout stays in the very transverse tube
+it was trained to cover: $\dist(\hat\state_k,\manifold)\le\rho^\star$ for all $k$ and all horizons.
+\end{proposition}
+\Cref{prop:selfconsistency} is the rigorous form of the rollout intuition: by generating and labeling the
+off-manifold states a rollout would reach, the loop drives the pair (covered tube, induced visited tube)
+to a self-consistent radius, so predictions stay bounded \emph{even as they deviate from the clean
+trajectories}. The contraction condition $\mathrm{Lip}(g)<1$ has a clean reading---coverage must improve
+faster than the tube it opens---and it fails exactly when the generator cannot keep up with the error it
+chases, delineating when anticipatory coverage helps. Proofs are in \cref{app:rolloutdeep}.
 
 \begin{remark}[Anticipatory DAgger]\label{rem:dagger}
 Uniform trajectory training is behavior cloning on the expert (clean-trajectory) distribution, whose
@@ -404,8 +534,30 @@ drawn from their prior, passed to $g_\phi$, and reused to label each synthesized
 step $\sol(\state,\param)$ via one solver call. Conditioning on a \emph{bin} rather than a continuous
 loss target makes the control robust to the (round-varying) scale of the loss and lets us reason about
 coverage per difficulty level. Realism is monitored online (total variation, power spectrum, and
-amplitude statistics against held-out true states) to ensure $\mathrm{supp}(\qgen)$ stays in/near
-$\manifold$; states the solver maps to non-finite values are rejected.
+amplitude statistics against held-out true states) to ensure $\supp(\qgen)$ stays in/near
+$\manifold$; states the solver maps to non-finite values are rejected. The realism requirement is itself
+quantitative: covering an \emph{inflated} support that strays off $\manifold$ inflates the worst case the
+surrogate must fit, and \cref{app:realism} bounds the resulting suboptimality by an integral-probability
+distance between $\qgen$ and the reachable reference---justifying the online statistics as a coverage
+\emph{certificate}, not a diagnostic.
+
+The sampling law $\pi$ is not a free heuristic: it is the discretized inner maximizer of the
+coverage/DRO objective \eqref{eq:objectives}.
+\begin{proposition}[The sampling law realizes the DRO inner maximizer]\label{prop:samplinglaw}
+Order the $B$ difficulty bins by increasing bin-mean loss $\ell_1\le\dots\le\ell_B$.
+\emph{(a)} For the KL ball $\mathcal U(\pnat)=\{\mathfrak q:\mathrm{KL}(\mathfrak q\|\pnat)\le\varepsilon\}$,
+the inner maximizer of $\Rdro$ reweights bins by $\mathfrak q^\star(b)\propto\pnat(b)\,e^{\ell_b/\eta}$
+with dual temperature $\eta(\varepsilon)\!\downarrow\!0$ as $\varepsilon\!\uparrow$
+(\cref{app:waterfilling}); the corresponding over-$\pnat$ generation tilt is the softmax law
+$\pi(b)\propto e^{\ell_b/\eta}$, well-approximated by $\pi(b)\propto e^{\beta b}$ when $\ell_b$ is monotone
+in $b$. \emph{(b)} For the CVaR / superquantile set at level $\beta\in(0,1)$ (the worst $\beta$-fraction of
+mass), the inner maximizer is uniform on the hardest $\lceil\beta B\rceil$ equal-frequency bins and zero
+elsewhere---the top-$k$ / upper-half law.
+\end{proposition}
+The generation law is therefore a choice of \emph{ambiguity set}: \texttt{exp\_bias} $\leftrightarrow$
+entropic (KL) DRO, \texttt{top\_half}/\texttt{top\_k} $\leftrightarrow$ CVaR DRO
+\citep{benTal2013dro,rockafellar2000cvar,duchi2021dro,sagawa2020groupdro}, with the temperature $\eta$ (or
+level $\beta$) the robustness radius, monotonically tied to $\unif$ through \cref{prop:mixture}.
 
 \paragraph{Difficulty signal: loss vs.\ epistemic disagreement.}
 The one-step loss conflates \emph{reducible} (epistemic) error---fixable with more data---with
@@ -415,6 +567,25 @@ small surrogate ensemble, $\mathrm{Var}_m\,\surr^{(m)}(\state,\param)$, a query-
 approximate-BALD signal \citep{houlsby2011bald,beluch2018ensembles} that isolates the reducible part. The
 two signals coincide where error is purely epistemic and diverge where it is aleatoric; we compare them
 in \cref{sec:exp}. Formal definitions are in \cref{app:difficulty}.
+\begin{proposition}[Reducible vs.\ irreducible difficulty]\label{prop:difficulty}
+For an ensemble $\{\surr^{(m)}\}_{m=1}^M$ with mean $\bar f$, the expected one-step loss at $\state$
+decomposes as
+\[
+  \E\,\lossf(\state)=\underbrace{\|\bar f(\state)-\sol(\state)\|^2}_{\text{bias}^2}
+  +\underbrace{\E_m\|\surr^{(m)}(\state)-\bar f(\state)\|^2}_{\text{epistemic (ensemble) variance}}
+  +\sigma^2_{\mathrm{irr}}(\state),
+\]
+where $\sigma^2_{\mathrm{irr}}$ is the misspecification/discretization floor. The disagreement signal
+$d^{\mathrm{ens}}(\state)=\tfrac1L\sum_i\Var_m\surr^{(m)}_i(\state)$ estimates the epistemic term---the
+only part reducible by more data---and in a linear--Gaussian surrogate model the expected reduction in
+posterior predictive error from labeling $\state$ equals exactly that term (A-optimality / BALD
+\citep{houlsby2011bald,beluch2018ensembles}). The raw loss conflates it with $\sigma^2_{\mathrm{irr}}$, so a
+loss-targeting generator can spend budget on irreducibly hard states that no amount of data fixes; a
+disagreement-targeting one does not.
+\end{proposition}
+This argues for a difficulty \emph{floor}: where $d^{\mathrm{ens}}\!\approx\!\sigma^2_{\mathrm{irr}}$ no
+reduction is possible and the bin should not be over-sampled---a guideline we make precise via the
+labeling-budget allocation of \cref{sec:method-design,app:budget}.
 
 \paragraph{Active-learning loop.}
 \Cref{alg:loop} is one round: build a mixed pool \eqref{eq:mixture}, retrain the surrogate ensemble,
@@ -435,6 +606,118 @@ number of solver calls, against which we compare uniform-trajectory and i.i.d.-u
 \State Retrain the difficulty-conditioned generator $g_\phi$ with a bin-balanced sampler.
 \end{algorithmic}
 \end{algorithm}
+
+\subsection{How much can generative sampling beat uniform sampling?}\label{sec:method-advantage}
+We can now quantify the advantage. Uniform trajectory sampling has three structural weaknesses, and
+generative state sampling removes each by a \emph{multiplicative} factor, plus a fourth, \emph{qualitative}
+gain off the manifold. All four sharpen precisely in the deployment-critical regime.
+
+\textbf{(i) Rare modes: an unbounded, rarity-scaled separation.} The states that dominate worst-case and
+rollout error are rare under $\pnat$.
+\begin{proposition}[Sampling separation]\label{prop:separation}
+Let $T$ be a target region (on $\manifold$ or in its tube) with natural measure $\pnat(T)=\delta_T$.
+\emph{(a)} Uniform trajectory sampling places its first state in $T$ after $\Theta(1/\delta_T)$ states in
+expectation, so attaining any nonzero coverage of $T$ costs $\Omega(1/\delta_T)$ solver calls; if
+$\delta_T=0$ (e.g.\ $T$ off-manifold) it is unattainable at \emph{any} budget. \emph{(b)} The
+difficulty-conditioned generator, once it represents the $T$-conditional density, supplies $T$-samples at
+$O(1)$ cost each and attains uniform error $\bar\epsilon$ on $T$ with $O(\mathrm{poly}(1/\bar\epsilon))$
+solver calls, \emph{independent of $\delta_T$}. The separation $\sim 1/\delta_T$ is therefore unbounded as
+$T$ becomes rare, and infinite once $T$ leaves the manifold.
+\end{proposition}
+This is the rare-event/importance-sampling speedup: uniform sampling is naive Monte Carlo on a rare set
+(cost $\propto1/\delta_T$); the conditional generator is an \emph{amortized adaptive importance sampler}
+(cost $\propto1$), with the loop discovering and reusing the hard density across rounds and parameters.
+
+For the targets that actually matter, $\delta_T$ is not merely small but \emph{exponentially} small, and the
+separation is exponential rather than polynomial.
+\begin{corollary}[Exponential separation for tail targets]\label{cor:ldp}
+Suppose the target is a level set $T_b=\{\state:g(\state)\ge b\}$ of a scalar difficulty observable $g$
+(amplitude, energy, or the difficulty score) whose cumulant generating function
+$\Lambda_g(\lambda)=\log\E_{\pnat}\!\bigl[e^{\lambda g}\bigr]$ is finite for $\lambda$ near $0$. Then the
+target rarity is exponentially small,
+\[
+  \delta_{T_b}=\pnat(g\ge b)\;\le\;e^{-I(b)},\qquad
+  I(b)=\sup_{\lambda\ge0}\bigl\{\lambda b-\Lambda_g(\lambda)\bigr\},
+\]
+with $I$ convex, nondecreasing, and (for sub-exponential $g$) unbounded in the level $b$. Uniform trajectory
+sampling therefore needs $\Omega\!\bigl(e^{I(b)}\bigr)$ solver calls to reach the level-$b$ tail, whereas the
+generator---conditioning directly on the level---needs $O(\mathrm{poly}(1/\bar\epsilon))$, \emph{independent
+of $b$}. The separation is $e^{I(b)}$: \emph{exponential in the rarity level}, not merely polynomial.
+\end{corollary}
+At the level of the dynamics, $I$ is the Donsker--Varadhan / thermodynamic-formalism rate functional of the
+system rather than a single-state Legendre transform \citep{donsker1975asymptotic,dembo1998large}; the
+rollout-critical events of dissipative chaos---the intermittent high-amplitude bursts of KS, the heteroclinic
+excursions---are exactly such exponentially-rare large-$g$ states, and they coincide with the
+high-amplification states of mechanism (iii). This is where the exponential gain is cashed in; on the typical
+bulk $I(b)\approx0$ and no exponential appears.
+
+\textbf{(ii) Autocorrelation: a $\tau_c$ efficiency gain.} Trajectory data is highly redundant.
+\begin{proposition}[Decorrelation gain]\label{prop:decorrelation}
+States within a trajectory have integrated autocorrelation time $\tau_c$ (in steps), so a length-$T$
+trajectory carries effective sample size $T/\tau_c$; the variance of any empirical loss or gradient
+estimate from trajectory data is inflated by $\approx\tau_c$ relative to i.i.d.\ sampling. Near-i.i.d.\
+generated states remove this factor---a $\tau_c\times$ gain that holds even in the attractor bulk and even
+for \emph{non-chaotic} systems (where $\tau_c$ is the relaxation time).
+\end{proposition}
+
+\textbf{(iii) Amplification weighting: the gain lands on the deployment metric.} By \cref{prop:gronwall} the
+rollout error is $\sum_j\bar\epsilon_j A_{j\to k}$, dominated by states with large finite-time stretching
+$A_{j\to k}$ (the bursts/unstable events), which are themselves rare under $\pnat$. Uniform sampling
+allocates training effort $\propto\pnat$ (occupancy), \emph{under-serving exactly the high-amplification
+states that govern rollout error}. Driving the generator by difficulty weighted by downstream amplification
+concentrates effort where it most reduces rollout error---a third multiplicative gain, specific to the
+deployed quantity rather than the static average.
+
+\textbf{Combined.} To reach uniform tube error $\bar\epsilon$ on the rollout-critical states---rare, high
+amplification, possibly off-manifold---uniform trajectory sampling pays on the order of
+$(\tau_c/\delta_T)\times$ the generative cost---which by \cref{cor:ldp} is the \emph{exponential}
+$\tau_c\,e^{I(b)}$ once the target is a difficulty tail---and \emph{infinitely} more for the off-manifold
+component.
+The win is large exactly when deployment is hard: rare modes (small $\delta_T$), stiff/slow dynamics
+(large $\tau_c$), strong local stretching (large $A$), and the off-manifold tube ($\delta_T=0$). On the
+easy bulk there is no win---only the bounded cost of \cref{cor:pareto}.
+
+\textbf{When the win is \emph{not} realized (honest boundaries).} The separation is an upper bound on the
+\emph{opportunity}; three conditions gate its realization, and each is monitored by the loop: the generator
+must be \emph{realistic} on $T$ (otherwise one covers an inflated, partly unphysical set---\cref{lem:realism},
+the realism gate); the targeted difficulty must be \emph{reducible} (epistemic), not aleatoric, else the
+budget chases an irreducible floor (\cref{prop:difficulty}, ensemble disagreement); and the active-learning
+regime must be benign---disagreement-based label complexity improves passive $O(1/\bar\epsilon)$ to
+$O(\log1/\bar\epsilon)$ only under favorable noise \citep{hanneke2014theory,settles2009active}. Proofs are in
+\cref{app:separation,app:decorrelation}.
+
+\subsection{From the theory to the algorithm: design principles}\label{sec:method-design}
+The results above are not decoration: each pins down a knob of \cref{alg:loop} that is otherwise tuned
+blind. We collect the consequences.
+\begin{enumerate}[label=\textbf{P\arabic*.},leftmargin=2.6em,topsep=3pt,itemsep=3pt]
+\item \textbf{Uniform fraction $\unif$ has a certificate and a closed-form cost.} \cref{prop:mixture} caps
+the bulk penalty at $1/\unif$; \cref{cor:pareto} shows coverage is bought one-for-one in bulk RMS. Pick the
+\emph{smallest} $\unif$ (most aggressive mining) meeting a stated bulk-degradation tolerance,
+$\unif\ge1-\sqrt{t}/((1-\delta)|\Delta|)$; never use $\unif=0$ (no bulk guarantee, unbounded weights).
+\item \textbf{The sampling law $\pi$ encodes the robustness set.} By \cref{prop:samplinglaw}, the softmax
+tilt \texttt{exp\_bias} is the KL-DRO maximizer and \texttt{top\_half}/\texttt{top\_k} the CVaR maximizer.
+Choose \texttt{exp\_bias} for smoothly tail-robust coverage and \texttt{top\_k} to harden a specific worst
+fraction; the temperature/level is the robustness radius and should move \emph{together} with $\unif$
+(both enlarge the ambiguity set).
+\item \textbf{Allocate the labeling budget by water-filling.} With per-bin learning curves
+$\ell_b(n_b)\approx a_b n_b^{-\kappa}+\sigma^2_{\mathrm{irr},b}$, the budget minimizing the worst-bin
+(coverage) loss is $n_b\propto a_b^{1/\kappa}$ and the one minimizing the bin-average is
+$n_b\propto a_b^{1/(\kappa+1)}$ (\cref{app:budget}). Both tilt toward hard bins; the minimax objective
+tilts \emph{harder}. This is the principled form of the bin-balanced sampler $+$ tilt.
+\item \textbf{Drive the generator by epistemic disagreement, with a floor.} \cref{prop:difficulty}: target
+ensemble variance (reducible error), not raw loss; stop enlarging a bin once its disagreement approaches
+its irreducible floor $\sigma^2_{\mathrm{irr},b}$, since neither water-filling nor coverage can lower it.
+\item \textbf{Set the tube radius self-consistently.} \cref{prop:selfconsistency}: target the states a
+rollout actually visits by setting the generation/perturbation radius
+$\rho_t\!\approx\!\widehat{\|e\|}_t/(1-L_{\sol})$ from the \emph{measured} rollout error, and iterate to the
+fixed point $\rho^\star$; do not fix $\rho$ a priori.
+\item \textbf{Gate on realism.} \cref{app:realism}: keep the IPM between $\qgen$'s summary statistics
+(TV, log-PSD, amplitude) and the reachable reference below a threshold; reject off-support draws. Coverage
+of an inflated set is wasted capacity and the bound degrades linearly in this IPM.
+\item \textbf{Stop on coverage, not on $\Rp$.} By \cref{thm:coverage} the target is small $\sup_S\lossf$;
+monitor the loss-profile inequality ($\sup/\mathrm{mean}$, Gini) on the stratified/tube sets and stop when
+it plateaus, regardless of the (insensitive) uniform metric.
+\end{enumerate}
 
 % =====================================================================
 \section{Experimental Plan and Preliminary Evidence}\label{sec:exp}
@@ -609,6 +892,187 @@ $\pi(b)\propto e^{\beta b}$. \textbf{Ensemble disagreement.} With members $\{\su
 $d^{\mathrm{ens}}(\state,\param)=\frac1L\sum_{i}\mathrm{Var}_m\,\surr^{(m)}_i(\state,\param)$, the mean
 per-coordinate variance, an approximate-BALD acquisition \citep{houlsby2011bald,beluch2018ensembles}. It
 falls back to the loss signal when $M=1$.
+
+\subsection{Proof of \cref{cor:pareto}: the linear coverage--bulk front}\label{app:pareto}
+Continue the two-region model of \cref{app:nofreelunch} with $\qgen=\mathbf 1_H/\pnat(H)$, so
+$\E_{\qgen}[\lossf]=\ell_H(\theta)=(\theta-\theta_H^\star)^2$. The mixture risk is
+\[
+  \Rq(\theta)=\unif\big[(1-\delta)\ell_B+\delta\ell_H\big]+(1-\unif)\ell_H
+  =\underbrace{\unif(1-\delta)}_{=:m}\,\ell_B(\theta)+\big(1-m\big)\,\ell_H(\theta),
+\]
+since the weight on $\ell_H$ is $\unif\delta+(1-\unif)=1-\unif(1-\delta)=1-m$. Minimizing the convex
+combination of two quadratics gives $\theta(\unif)=m\,\theta_B^\star+(1-m)\theta_H^\star$. Writing
+$\Delta=\theta_H^\star-\theta_B^\star$, we have $\theta(\unif)-\theta_B^\star=(1-m)\Delta$ and
+$\theta(\unif)-\theta_H^\star=-m\Delta$, so
+\[
+  \Rp(\theta(\unif))=(1-\delta)(1-m)^2\Delta^2+\delta\,m^2\Delta^2 .
+\]
+The $\pnat$-optimum is $m=1-\delta$ (i.e.\ $\unif=1$), giving $\Rp(\theta_\pnat^\star)=\delta(1-\delta)\Delta^2$.
+Substituting $m=\unif(1-\delta)$ and using $(1-\delta)+\delta=1$,
+\[
+  \Rp(\theta(\unif))-\Rp(\theta_\pnat^\star)
+  =\Delta^2(1-\delta)\big[(1-m)^2+\tfrac{\delta}{1-\delta}m^2-\delta\big]
+  =\Delta^2(1-\delta)\cdot(1-\delta)(1-\unif)^2=(1-\delta)^2(1-\unif)^2\Delta^2,
+\]
+where the bracket simplifies to $(1-\delta)(1-\unif)^2$ after expanding and using $m=\unif(1-\delta)$ (the
+$\unif$-linear and constant terms cancel because $a+\delta=1$ with $a=1-\delta$). The hard-region risk is
+$R_H(\theta(\unif))=(\theta(\unif)-\theta_H^\star)^2=m^2\Delta^2=(1-\delta)^2\unif^2\Delta^2$. Taking square
+roots, for $\unif\in[0,1]$,
+\[
+  \sqrt{\Rp(\theta(\unif))-\Rp(\theta_\pnat^\star)}+\sqrt{R_H(\theta(\unif))}
+  =(1-\delta)|\Delta|\,(1-\unif)+(1-\delta)|\Delta|\,\unif=(1-\delta)|\Delta|,
+\]
+a constant. The $\unif$-rule follows by requiring $\sqrt{\Rp-\Rp^\star}=(1-\delta)|\Delta|(1-\unif)\le\sqrt t$.
+$\hfill\square$
+
+\subsection{Proof of \cref{prop:samplinglaw}: sampling laws as inner maximizers}\label{app:samplinglaw}
+\emph{(a) KL ball.} By \cref{app:waterfilling}, the entropic inner maximizer is
+$\mathfrak q^\star(\state)\propto\pnat(\state)e^{\lossf(\state)/\eta}$ with $\eta=\eta(\varepsilon)$
+decreasing in the radius $\varepsilon$. Aggregating over an equal-frequency bin $b$ on which $\lossf$ is
+approximately constant at the bin-mean $\ell_b$ gives $\mathfrak q^\star(b)\propto\pnat(b)e^{\ell_b/\eta}$.
+The generator supplies the over-$\pnat$ component, i.e.\ the tilt $\pi(b)=\mathfrak q^\star(b)/\pnat(b)\propto
+e^{\ell_b/\eta}$, the softmax law. If $\ell_b$ is affine in the bin index, $\ell_b\approx\ell_1+(b-1)\Delta\ell$,
+then $\pi(b)\propto e^{\beta b}$ with $\beta=\Delta\ell/\eta$.
+
+\emph{(b) CVaR / superquantile.} The CVaR ambiguity set at level $\beta\in(0,1)$ is
+$\mathcal U_\beta=\{\mathfrak q\ll\pnat:\ \mathrm d\mathfrak q/\mathrm d\pnat\le 1/\beta\}$, and
+$\max_{\mathfrak q\in\mathcal U_\beta}\E_{\mathfrak q}[\lossf]=\CVaR_\beta(\lossf)$, the average of $\lossf$
+over its worst $\beta$-fraction of $\pnat$-mass; the maximizer puts density $1/\beta$ on
+$\{\lossf\ge\mathrm{VaR}_\beta\}$ and $0$ below it \citep{rockafellar2000cvar}. With $B$ equal-frequency
+bins ordered by $\ell_b$, the worst $\beta$-fraction is the top $\lceil\beta B\rceil$ bins, on which the
+maximizer is uniform---the top-$k$/upper-half law. $\hfill\square$
+
+\subsection{Labeling-budget allocation by water-filling}\label{app:budget}
+The fixed per-round budget (\cref{sec:exp}) is split as $n_b$ labels in bin $b$, $\sum_b n_b=N$. Model the
+attainable loss in bin $b$ by a learning curve $\ell_b(n_b)=a_b\,n_b^{-\kappa}+\sigma^2_{\mathrm{irr},b}$
+with exponent $\kappa>0$, reducible scale $a_b\ge0$, and the irreducible floor of \cref{prop:difficulty}.
+\begin{proposition}[Water-filling allocation]\label{prop:budget}
+Treating $n_b$ as continuous, (i) the allocation minimizing the worst-bin reducible loss
+$\max_b a_b n_b^{-\kappa}$ subject to $\sum_b n_b=N$ equalizes $a_b n_b^{-\kappa}$ across bins, giving
+$n_b\propto a_b^{1/\kappa}$; (ii) the allocation minimizing the bin-average
+$\sum_b a_b n_b^{-\kappa}$ satisfies $n_b\propto a_b^{1/(\kappa+1)}$. Both are increasing in $a_b$ (harder
+bins receive more budget), with (i) strictly more concentrated than (ii) since $1/\kappa>1/(\kappa+1)$;
+bins dominated by the floor ($a_b\!\to\!0$) receive $\to0$ budget.
+\end{proposition}
+\emph{Proof.} The floor $\sigma^2_{\mathrm{irr},b}$ is independent of $n_b$ and drops from both objectives.
+(i) At the minimax optimum all reducible terms equal a common $v$, so $a_b n_b^{-\kappa}=v\Rightarrow
+n_b=(a_b/v)^{1/\kappa}$; $v$ is fixed by $\sum_b n_b=N$. (ii) Form the Lagrangian
+$\mathcal L=\sum_b a_b n_b^{-\kappa}+\lambda(\sum_b n_b-N)$; stationarity
+$\partial\mathcal L/\partial n_b=-\kappa a_b n_b^{-\kappa-1}+\lambda=0$ gives
+$n_b=(\kappa a_b/\lambda)^{1/(\kappa+1)}\propto a_b^{1/(\kappa+1)}$. Since the maps $a\mapsto a^{1/\kappa}$
+and $a\mapsto a^{1/(\kappa+1)}$ are increasing and the former is steeper for $a>$ a crossover, (i) places
+relatively more mass on the hardest bins. $\hfill\square$
+
+This is the principled form of design principle \textbf{P3}: the bin-balanced sampler plus a hard-tilt is
+a discretization of water-filling, the minimax (coverage) objective justifies a sharper tilt than the
+average objective, and the irreducible floor (estimated by the gap between loss and ensemble disagreement,
+\cref{prop:difficulty}) tells the loop when to stop enlarging a bin.
+
+\subsection{Proofs of \cref{prop:exposure,prop:selfconsistency}}\label{app:rolloutdeep}
+\emph{\Cref{prop:exposure}.} Since the true trajectory stays in $\manifold$,
+$\dist(\hat\state_k,\manifold)\le\|\hat\state_k-\state_k\|=\|e_k\|$, so \cref{ass:offman} gives
+$\lossf^{1/2}(\hat\state_k)\le\epsilon_0+\gamma\|e_k\|$. Substituting into the exact recursion
+\eqref{eq:rollout-recursion}, $\|e_{k+1}\|\le\epsilon_0+\gamma\|e_k\|+L_{\sol}\|e_k\|
+=\epsilon_0+(L_{\sol}+\gamma)\|e_k\|$. The scalar map $x_{k+1}=\epsilon_0+(L_{\sol}+\gamma)x_k$, $x_0=0$,
+dominates $\|e_k\|$: if $L_{\sol}+\gamma<1$ it converges up to $\epsilon_0/(1-L_{\sol}-\gamma)$; if
+$L_{\sol}+\gamma>1$ then $x_k=\epsilon_0\big((L_{\sol}+\gamma)^k-1\big)/(L_{\sol}+\gamma-1)$, and setting
+$x_k=\tau$ yields the stated $K_\tau$. Both are the bounds of \cref{prop:tube} with $L_{\sol}$ replaced by
+the inflated rate $L_{\sol}+\gamma$, which is strictly worse; $\gamma\to0$, $\epsilon_0\to\bar\epsilon$
+recovers \cref{prop:tube}. $\hfill\square$
+
+\emph{\Cref{prop:selfconsistency}.} By hypothesis $g(\rho)=\mathcal E(\rho)/(1-L_{\sol})$ maps the complete
+metric space $[0,\rho_{\max}]$ into itself and is a contraction, $\mathrm{Lip}(g)<1$. The Banach
+fixed-point theorem gives a unique $\rho^\star$ with $g(\rho^\star)=\rho^\star$ and geometric convergence
+$|\rho_{t+1}-\rho^\star|\le\mathrm{Lip}(g)\,|\rho_t-\rho^\star|$ from any $\rho_0$. At $\rho^\star$ the
+surrogate covers $\mathcal T_{\rho^\star}$ to uniform error $\bar\epsilon=\mathcal E(\rho^\star)$, so by
+\cref{prop:tube}(a) its rollout is trapped with $\|e_k\|\le\bar\epsilon/(1-L_{\sol})=g(\rho^\star)=\rho^\star$
+for all $k$; the visited tube coincides with the covered tube. $\hfill\square$
+
+\subsection{Realism as a coverage certificate}\label{app:realism}
+Let $\mu$ be the \emph{reachable} coverage measure (supported on $\manifold\cap\tube$) and $\qgen$ the
+generator law; the loop minimizes $\E_{\qgen}[\lossf]$ but the deployment-relevant quantity is
+$\E_{\mu}[\lossf]$.
+\begin{lemma}[Realism gap]\label{lem:realism}
+For $\Lip$-Lipschitz loss, $\ \big|\E_{\qgen}[\lossf]-\E_{\mu}[\lossf]\big|\le\Lip(\lossf)\,W_1(\qgen,\mu).$
+Consequently minimizing the surrogate's loss under $\qgen$ controls the reachable coverage loss up to
+$\Lip(\lossf)\,W_1(\qgen,\mu)$; mass that $\qgen$ places off $\manifold$ enters as a $W_1$ penalty, so the
+coverage guarantee degrades \emph{linearly} in how far $\qgen$ strays from the reachable set.
+\end{lemma}
+\emph{Proof.} Kantorovich--Rubinstein duality, exactly as in \cref{app:ipm}. $\hfill\square$
+
+For any family $\mathcal F$ of $1$-Lipschitz feature maps, the integral probability metric
+$d_{\mathcal F}(\qgen,\mu)=\sup_{h\in\mathcal F}|\E_{\qgen}h-\E_\mu h|\le W_1(\qgen,\mu)$ is a computable
+lower bound; the online realism statistics (total variation, log-power-spectrum, amplitude moments) are
+such features, so keeping $d_{\mathcal F}$ small is \emph{necessary} for small $W_1$ and is the monitored
+proxy behind the realism gate (design principle \textbf{P6}). Rejecting solver-non-finite draws removes the
+$W_1=\infty$ tail outright.
+
+\subsection{General rollout bound and the stability menu}\label{app:regimes}
+\emph{Proof of \cref{prop:gronwall}.} From \eqref{eq:rollout-recursion},
+$\|e_{k+1}\|\le a_k+L_k\|e_k\|$ with $a_k=\lossf^{1/2}(\hat\state_k)$ and $L_k$ the local amplification at
+$\hat\state_k$. With $e_0=0$, an immediate induction gives
+$\|e_k\|\le\sum_{j=0}^{k-1}a_j\prod_{i=j+1}^{k-1}L_i=\sum_{j<k}a_j A_{j\to k}$. Under \cref{ass:tube},
+$a_j\le\bar\epsilon$ on the visited tube, so $\|e_k\|\le\bar\epsilon\sum_{j<k}A_{j\to k}$. $\hfill\square$
+
+The menu records how $\sum_j A_{j\to k}$ behaves and what it buys; the common multiplier is always
+$\bar\epsilon$.
+\emph{(G0) Dissipativity.} If $V\ge0$ satisfies $V(\sol\state)\le(1-c)V(\state)+b$ and is robust to an
+additive perturbation of size $\bar\epsilon$ (i.e.\ $V(\hat\state_{k+1})\le(1-c)V(\hat\state_k)+b+c'\bar\epsilon$),
+then $V(\hat\state_k)$ is bounded by $(b+c'\bar\epsilon)/c$: an input-to-state-stable absorbing ball, no
+contraction of trajectories required \citep{sontag2008iss}. \emph{(G1) Robust invariance.} If a set $S$
+satisfies $\sol(S)\oplus B(\bar\epsilon)\subseteq S$ then $\hat\state_k\in S\Rightarrow\hat\state_{k+1}\in S$
+by the disturbance bound, so $S$ traps the rollout for all $k$. \emph{(G2) Contraction in a metric.} If in
+some metric $L_i\le\rho_c<1$, then $A_{j\to k}\le\rho_c^{k-j}$ and $\sum_{j<k}A_{j\to k}\le1/(1-\rho_c)$,
+giving \cref{prop:tube}(a). A negative log-norm $\mu(D\sol)<0$ suffices even when $\|D\sol\|_2>1$
+(non-normality: Euclidean norm overstates asymptotic growth) \citep{lohmiller1998contraction}; for
+dissipative PDEs the contracting directions are those transverse to the finite-dimensional inertial
+manifold \citep{foias1988inertial,temam1997infinite}, while the tangent (chaotic) directions fall under
+(G3)--(G4) and \cref{prop:tube}(b). \emph{(G3) Mixing.} A spectral gap of the transfer operator gives
+exponential decay of correlations; first-order perturbation of the SRB/invariant measure (linear response)
+yields $\|\nu_\theta-\mu\|\lesssim\bar\epsilon/\mathrm{gap}$, controlling long-term statistics. Linear
+response may fail for non-uniformly hyperbolic systems \citep{baladi2014linear}, so this is stated
+conditionally on the gap. \emph{(G4) Shadowing.} For uniformly hyperbolic systems the shadowing lemma
+\citep{bowen1975equilibrium} turns a $\bar\epsilon$-pseudo-orbit (our rollout, by \cref{ass:tube}) into a
+genuine nearby orbit; for KS-type non-uniform hyperbolicity only finite-time/numerical shadowing is
+available \citep{wang2014lss,cvitanovic2016chaos}, which still certifies physical validity over the stable
+horizon of \cref{prop:tube}(b).
+
+\subsection{Proof of \cref{prop:separation}: the sampling separation}\label{app:separation}
+\emph{(a)} Under stationarity each uniform state lies in $T$ with probability $\pnat(T)=\delta_T$
+independently enough that the index of the first hit is (stochastically dominated by) a geometric variable
+of mean $1/\delta_T$; hence the expected number of solver-advanced states before any mass is placed in $T$
+is $\Theta(1/\delta_T)$, and covering $T$ to a fixed resolution needs $\Omega(1/\delta_T)$ such states. If
+$\delta_T=0$ (a set of $\pnat$-measure zero, e.g.\ states at positive distance from $\manifold$), no finite
+trajectory sample ever intersects $T$. \emph{(b)} Sampling from the generator's $T$-conditional law costs
+$O(1)$ solver calls per labeled state (one step $\sol$), and estimating/fitting the $T$-conditional target
+to one-step accuracy $\bar\epsilon$ is a standard regression problem requiring
+$n=O(\mathrm{poly}(1/\bar\epsilon))$ labeled states, with no $1/\delta_T$ factor. The ratio of solver-call
+costs is thus $\Omega(1/\delta_T)$ and unbounded. The caveat is that (b) presupposes the generator has
+\emph{learned} the $T$-conditional density; the active-learning loop amortizes this across rounds, and the
+realism certificate (\cref{lem:realism}) bounds the error from an imperfect conditional. $\hfill\square$
+
+\subsection{Proof of \cref{cor:ldp}: exponential separation}\label{app:ldp}
+For any $\lambda\ge0$, Markov's inequality applied to $e^{\lambda g}$ gives
+$\pnat(g\ge b)\le e^{-\lambda b}\,\E_{\pnat}e^{\lambda g}=e^{-(\lambda b-\Lambda_g(\lambda))}$; minimizing the
+exponent over $\lambda\ge0$ yields $\delta_{T_b}\le e^{-I(b)}$ with $I=\Lambda_g^\ast$ the Legendre transform
+(the Cram\'er/Chernoff bound---only the large-deviation \emph{upper} bound is used, which needs a finite MGF,
+not a full LDP). $I$ is convex as a Legendre transform, nondecreasing on $[\E_{\pnat}g,\infty)$, and diverges
+as $b\to\infty$ whenever $g$ is sub-exponential. Substituting $1/\delta_{T_b}\ge e^{I(b)}$ into the
+$\Omega(1/\delta_T)$ lower bound of \cref{prop:separation}(a) gives the $\Omega(e^{I(b)})$ uniform-sampling
+cost, while the generator cost of \cref{prop:separation}(b) is unchanged and $b$-independent, so the ratio is
+$e^{I(b)}$. For time-averaged or empirical-measure difficulty observables the same $e^{-nI}$ rarity holds
+with the Donsker--Varadhan rate of the dynamics replacing the single-state transform
+\citep{donsker1975asymptotic,dembo1998large}; again only the upper bound is invoked. $\hfill\square$
+
+\subsection{Proof of \cref{prop:decorrelation}: the decorrelation gain}\label{app:decorrelation}
+For a stationary sequence $\{X_i\}$ with variance $\sigma^2$ and normalized autocovariances
+$r_k=\mathrm{Cov}(X_0,X_k)/\sigma^2$, the sample mean over $n$ consecutive states has variance
+$\mathrm{Var}(\bar X_n)=\tfrac{\sigma^2}{n}\bigl(1+2\sum_{k=1}^{n-1}(1-\tfrac{k}{n})r_k\bigr)
+\xrightarrow{n\to\infty}\tfrac{\sigma^2}{n}\,\tau_c$, where $\tau_c=1+2\sum_{k\ge1}r_k$ is the integrated
+autocorrelation time. Thus $n$ trajectory states are worth an effective $n/\tau_c$ i.i.d.\ samples, and any
+loss/gradient average inherits the variance inflation $\tau_c$. Independent draws have $r_k=0$, $\tau_c=1$,
+recovering the i.i.d.\ rate; the generator's (near-)i.i.d.\ outputs realize this $\tau_c\times$ gain.
+$\hfill\square$
 
 \subsection{Evaluation sets and the efficiency axis}\label{app:protocol}
 \textbf{Difficulty-stratified tails.} From a large bank of uniform trajectories, rank transitions by a
