@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Phase 2 (docs/roadmap.md). G1 passed: hard/tube metrics reveal the generator's gain.
-# Now: (A) uniform_fraction Pareto sweep {0,.25,.5,.75,1}, (B) difficulty signal loss vs
-# ensemble disagreement at uf=0.5. Stronger surrogate (hidden64 + ensemble3). 5 seeds each.
-# uf=1.0 = pure-uniform baseline (generator disabled).
+# Phase 2 (docs/roadmap.md) -- CLEAN matched relaunch. G1 passed: hard/tube metrics reveal
+# the generator's gain. (A) uniform_fraction Pareto sweep {0,.25,.5,.75,1}, (B) difficulty
+# signal loss vs ensemble disagreement at uf=0.5. Surrogate hidden64 + ensemble2 (cheaper);
+# rounds=10 HARD CAP so every seed stops at exactly round 10 -> a properly matched
+# solver-call budget (the first run spanned rounds 10-30 with 4 failed seeds). 5 seeds each.
+# uf=1.0 = pure-uniform baseline (generator disabled). New output root keeps the old runs.
 
-export BIGFOOT_WALLTIME="20:00:00"
+export BIGFOOT_WALLTIME="16:00:00"      # rounds=10 + ensemble2: ~6h A100 / ~13h V100
 export BIGFOOT_PRECREATE_VALIDATION=0   # validation npz already exists
 
 BASE_CFG="configs/bigfoot_ks_phase2_base.yaml"
-BASE_DIR="/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/ks800_phase2_5seed"
+BASE_DIR="/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/ks800_phase2_clean_5seed"
 SEEDS=(101 202 303 404 505)
 
 # name -> "extra --set args" (uniform_fraction sweep + difficulty signal axis)

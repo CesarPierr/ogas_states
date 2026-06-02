@@ -33,7 +33,7 @@ pool:
 surrogate:
   hidden: 64
   depth: 4
-  ensemble_size: 3
+  ensemble_size: 2   # was 3; reduced for cheaper/faster runs (affects future runs only)
   epochs_per_round: 15
   batch_size: 128   # hidden64+ensemble3 at res800: batch512 OOMs (~25GiB); 128 fits with margin
   lr: 0.001
