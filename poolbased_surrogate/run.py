@@ -24,7 +24,9 @@ from .checkpoint import load_checkpoint, save_checkpoint
 from .config import load_config
 from .eval import (
     create_validation_data,
+    evaluate_one_step_validation,
     evaluate_validation,
+    load_hard_validation_sets,
     load_validation_data,
     save_validation_data,
 )
@@ -147,6 +149,11 @@ def main(argv: list[str] | None = None) -> None:
     validation = load_or_create_validation(cfg, pde, out)
     if args.create_validation_only:
         return
+
+    # Optional fixed hard/tube/coverage sets (post-hoc yardstick); logged each round under hard_val/.
+    hard_sets = load_hard_validation_sets(cfg.validation.hard_dir) if cfg.validation.hard_dir else {}
+    if hard_sets:
+        print(f"loaded {len(hard_sets)} hard/tube validation sets: {sorted(hard_sets)}", flush=True)
 
     # Validation-set statistics used to z-normalize states for DDPM training/generation,
     # so generated states stay within the physical range of the data.
@@ -318,6 +325,16 @@ def main(argv: list[str] | None = None) -> None:
             device=device,
         )
         finish_phase("full_validation", phase_start)
+        hard_metrics: dict[str, float] = {}
+        if hard_sets:
+            phase_start = time.perf_counter()
+            for name, hset in hard_sets.items():
+                hard_metrics.update(
+                    evaluate_one_step_validation(
+                        model, hset, cfg.validation.quantiles, device, prefix=f"hard_val/{name}"
+                    )
+                )
+            finish_phase("hard_validation", phase_start)
         timing_metrics["timing/round_before_diagnostics_sec"] = float(time.perf_counter() - round_start_time)
         metrics = {
             "round": round_id,
@@ -328,6 +345,7 @@ def main(argv: list[str] | None = None) -> None:
             **ddpm_metrics,
             **gen_eval_metrics,
             **eval_metrics,
+            **hard_metrics,
             **timing_metrics,
         }
         metrics.update(pool_debug_metrics(pool, pretrain_losses, cfg.ddpm.loss_metric))

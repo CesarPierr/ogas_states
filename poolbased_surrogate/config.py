@@ -91,6 +91,7 @@ class ValidationConfig:
     quantiles: list[float] = field(default_factory=lambda: [0.1, 0.25, 0.5, 0.75, 0.9])
     rollout_steps: int = 50
     path: str | None = None
+    hard_dir: str | None = None  # dir of post-hoc hard/tube/cov sets; if set, logged per round under hard_val/
     epoch_n_trajectories: int = 128
 
 

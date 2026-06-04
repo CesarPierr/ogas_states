@@ -61,6 +61,27 @@ def load_validation_data(path: Path) -> ValidationData:
         )
 
 
+def load_hard_validation_sets(hard_dir: Path | str) -> dict[str, ValidationData]:
+    """Load post-hoc hard/tube/coverage validation sets (``val_hard_*.npz``,
+    ``val_tube_*.npz``, ``val_cov.npz``) built by ``scripts/build_hard_validation.py`` and
+    ``build_tube_validation.py``. Returns ``{set_name: ValidationData}``; a missing directory
+    yields ``{}`` so callers can treat these sets as optional."""
+    d = Path(hard_dir)
+    if not d.is_dir():
+        return {}
+    files = sorted(d.glob("val_hard_*.npz")) + sorted(d.glob("val_tube_*.npz"))
+    cov = d / "val_cov.npz"
+    if cov.exists():
+        files.append(cov)
+    sets: dict[str, ValidationData] = {}
+    for f in files:
+        try:
+            sets[f.stem] = load_validation_data(f)
+        except Exception as exc:  # defensive: a bad file shouldn't kill training
+            print(f"  skipping hard validation set {f.name}: {exc}")
+    return sets
+
+
 @torch.no_grad()
 def evaluate(
     model: EnsembleSurrogate,
