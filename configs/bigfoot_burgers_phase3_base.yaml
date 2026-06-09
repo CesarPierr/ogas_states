@@ -1,0 +1,76 @@
+seed: 101
+device: auto
+output_dir: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs/burgers256_phase3/base
+
+# Phase 3 base config (see docs/roadmap.md Phase 3).
+# Replicates the Phase 2 KS active learning sweep settings: hidden 64 + ensemble 2,
+# 10 rounds, flow_matching generator, conditional_quantile mode.
+# Swept parameters: uniform_fraction and difficulty_signal (loss vs ensemble_var).
+
+pde:
+  name: burgers
+  backend: al4pde
+  resolution: 256
+  domain_length: 1.0
+  dt: 0.0002
+  viscosity_range: [0.003, 0.03]
+  param_ranges:
+    - [0.003, 0.03]
+  param_log_scale: [true]
+  ic:
+    modes: 5
+    amplitude: 1.0
+
+pool:
+  rounds: 10
+  trajectory_steps: 70
+  n_trajectories: 250
+  uniform_fraction: 0.5
+
+surrogate:
+  hidden: 64
+  depth: 4
+  ensemble_size: 2
+  epochs_per_round: 15
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  difficulty_signal: loss
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 128
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 2048
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+
+validation:
+  n_trajectories: 1500
+  trajectory_steps: 100
+  path: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation/burgers_res256_seed42_n1500_t100.npz
+  hard_dir: /bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation/burgers_hard_sub5
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 100
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: burgers256_phase3
