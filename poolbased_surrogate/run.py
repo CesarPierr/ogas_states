@@ -277,6 +277,9 @@ def main(argv: list[str] | None = None) -> None:
                 model, pool, cfg.surrogate.batch_size, device
             )
         finish_phase("pretrain_losses", phase_start)
+        pre_train_state = None
+        if cfg.surrogate.degradation_guard > 0:
+            pre_train_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         print(f"round {round_id}: training surrogate", flush=True)
         phase_start = time.perf_counter()
         train_metrics = train_surrogate(
@@ -363,6 +366,34 @@ def main(argv: list[str] | None = None) -> None:
             device=device,
         )
         finish_phase("full_validation", phase_start)
+        guard_metrics: dict[str, float] = {}
+        if pre_train_state is not None:
+            guard_metrics["surrogate/guard_reverted"] = 0.0
+            prev_bulk = history[-1].get("val/nrmse_mean") if history else None
+            cur_bulk = eval_metrics.get("val/nrmse_mean")
+            if (
+                prev_bulk is not None
+                and cur_bulk is not None
+                and np.isfinite(prev_bulk)
+                and cur_bulk > cfg.surrogate.degradation_guard * prev_bulk
+            ):
+                print(
+                    f"round {round_id}: degradation guard fired "
+                    f"(val/nrmse_mean {cur_bulk:.5f} > {cfg.surrogate.degradation_guard}x "
+                    f"previous {prev_bulk:.5f}) — reverting surrogate to pre-round weights",
+                    flush=True,
+                )
+                model.load_state_dict(pre_train_state)
+                model.to(device)
+                guard_metrics["surrogate/guard_reverted"] = 1.0
+                guard_metrics["surrogate/guard_rejected_nrmse"] = float(cur_bulk)
+                eval_metrics = evaluate_validation(
+                    model=model,
+                    validation=validation,
+                    rollout_steps=cfg.validation.rollout_steps,
+                    quantiles=cfg.validation.quantiles,
+                    device=device,
+                )
         hard_metrics: dict[str, float] = {}
         if hard_sets:
             phase_start = time.perf_counter()
@@ -384,6 +415,7 @@ def main(argv: list[str] | None = None) -> None:
             **gen_eval_metrics,
             **eval_metrics,
             **hard_metrics,
+            **guard_metrics,
             **timing_metrics,
         }
         metrics.update(pool_debug_metrics(pool, pretrain_losses, cfg.ddpm.loss_metric))

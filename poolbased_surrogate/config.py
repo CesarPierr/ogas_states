@@ -63,6 +63,12 @@ class SurrogateConfig:
     # Loss-weighted replay: oversample hard transitions (by pretrain loss) during
     # surrogate training. Hard-mining baseline at zero extra solver cost.
     loss_weighted_replay: bool = False
+    # Degradation guard: if val/nrmse_mean after a round's training exceeds
+    # guard x previous round's value, revert the surrogate to its pre-training
+    # weights for this round (the pool keeps the new data). 0 = off. Targets the
+    # intermittent bad-training-round collapse seen in gen_v3 (seed 303 r9: bulk
+    # x17 in one round while r8 was its best).
+    degradation_guard: float = 0.0
 
 
 @dataclass

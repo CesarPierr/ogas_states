@@ -56,7 +56,7 @@ def main() -> None:
 
     data = {a: collect(args.base_dir, a, args.n_rounds) for a in ARMS}
     data = {a: d for a, d in data.items() if d}
-    ns = {a: len(next(iter(d.values()))) for a, d in data.items()}
+    ns = {a: max(len(v) for v in d.values()) for a, d in data.items()}
     print(f"arms found (n seeds): { {a: ns[a] for a in data} }\n")
 
     metrics = [f"hard_val/{s}/{args.metric}" for s in SETS] + BULK
