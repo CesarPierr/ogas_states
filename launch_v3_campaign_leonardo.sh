@@ -2,7 +2,14 @@
 # V3 5-seed campaign on Leonardo: same 6 arms as the pilot, seeds 202/303/404/505
 # (seed 101 = the pilot itself, same run-dir layout, so analysis globs all 5 seeds).
 # Usage: bash launch_v3_campaign_leonardo.sh [seed ...]   (default: 202 303 404 505)
+# ARMS env var restricts which arms launch (space-separated), e.g. for the 10-seed
+# extension of the headline claims only:
+#   ARMS="uniform_baseline random_tube gen_v3 gen_v3_edit" \
+#     bash launch_v3_campaign_leonardo.sh 606 707 808 909 1010
 set -euo pipefail
+
+ARMS="${ARMS:-uniform_baseline noise_inject random_tube mined_ic gen_v3 gen_v3_edit}"
+want_arm() { case " $ARMS " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 export LEONARDO_WALLTIME="${LEONARDO_WALLTIME:-10:00:00}"
 export LEONARDO_PRECREATE_VALIDATION=0   # bank must already exist (see LEONARDO.md)
@@ -14,6 +21,7 @@ SEEDS=("${@:-202 303 404 505}")
 
 launch_job() {
   local name=$1 seed=$2; shift 2
+  want_arm "$name" || return 0
   export LEONARDO_RUN_DIR="$BASE_DIR/${name}_seed${seed}"
   mkdir -p "$LEONARDO_RUN_DIR"
   export LEONARDO_JOB_NAME="v3_${name}_${seed}"
