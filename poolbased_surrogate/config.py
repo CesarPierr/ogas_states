@@ -104,6 +104,24 @@ class DDPMConfig:
     # top1, top2, top3, top5, top_half, exp_bias, uniform.
     sample_strategy: str = "exp_bias"
     sample_strategy_temp: float = 0.5
+    # --- conditioning strength ---------------------------------------------------------
+    # Classifier-free guidance on the quantile label (mode == "conditional_quantile"):
+    #   cfg_dropout -> per-sample probability of replacing the label embedding with a
+    #                  learned NULL embedding during generator training (0 = off).
+    #   cfg_scale   -> sampling-time guidance weight: out = null + cfg_scale*(cond-null);
+    #                  1.0 = exactly the conditional prediction (legacy, one forward
+    #                  pass per step); != 1.0 costs a second forward pass per step.
+    # The NULL embedding parameter is only created when either knob is active, so
+    # default configs produce byte-identical state_dicts; checkpoint loading tolerates
+    # the missing/extra key (checkpoint.py).
+    cfg_dropout: float = 0.0
+    cfg_scale: float = 1.0
+    # How the conditioning vector enters the denoiser:
+    #   "concat" -> broadcast + concatenated as input channels (legacy)
+    #   "film"   -> keeps the input concat AND adds per-residual-block FiLM
+    #               scale-shift h*(1+gamma)+beta from a zero-initialised per-block
+    #               Linear on the cond vector (requires residual_blocks > 0).
+    cond_mode: str = "concat"
     # --- conditioning-signal hygiene -------------------------------------------------
     # Which losses label difficulty for generator binning:
     #   "pretrain"  -> previous round's surrogate on this (unseen) pool: honest,
