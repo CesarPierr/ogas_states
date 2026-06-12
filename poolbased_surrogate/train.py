@@ -52,6 +52,41 @@ def sample_quantile_labels(
     raise ValueError(f"Unknown quantile sample strategy {strategy!r}")
 
 
+def _member_loader(
+    pool: TransitionPool,
+    batch_size: int,
+    seed: int | None,
+    member_id: int,
+    bootstrap: bool,
+    replay_weights: np.ndarray | None,
+) -> DataLoader:
+    """One independently shuffled DataLoader per ensemble member.
+
+    Each member gets its own RNG stream (decorrelated batch order) and, with
+    bootstrap=True, its own with-replacement resample of the pool — so ensemble
+    disagreement reflects data/order diversity, not just init noise. Optional
+    replay_weights bias sampling toward hard transitions (loss-weighted replay).
+    """
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed * 1000 + member_id)
+    n = len(pool)
+    if replay_weights is not None:
+        w = torch.from_numpy(np.asarray(replay_weights, dtype=np.float64).clip(min=1e-12))
+        sampler = WeightedRandomSampler(w, num_samples=n, replacement=True, generator=generator)
+        return DataLoader(TransitionDataset(pool), batch_size=batch_size, sampler=sampler, drop_last=False)
+    if bootstrap and member_id > 0:
+        # member 0 sees the full pool in shuffled order; members >0 see bootstrap resamples
+        sampler = WeightedRandomSampler(
+            torch.ones(n, dtype=torch.float64), num_samples=n, replacement=True, generator=generator
+        )
+        return DataLoader(TransitionDataset(pool), batch_size=batch_size, sampler=sampler, drop_last=False)
+    return DataLoader(
+        TransitionDataset(pool), batch_size=batch_size, shuffle=True, drop_last=False, generator=generator
+    )
+
+
 def train_surrogate(
     model: EnsembleSurrogate,
     pool: TransitionPool,
@@ -63,36 +98,42 @@ def train_surrogate(
     epoch_callback=None,
     round_id: int = 0,
     seed: int | None = None,
+    ensemble_bootstrap: bool = True,
+    input_noise_std: float = 0.0,
+    loss_weighted_replay: bool = False,
 ) -> dict[str, float]:
     if seed is not None:
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
     model.train()
 
     opts = [
         torch.optim.AdamW(m.parameters(), lr=lr, weight_decay=weight_decay)
         for m in model.models
     ]
-    loader_generator = None
-    if seed is not None:
-        loader_generator = torch.Generator()
-        loader_generator.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    loader = DataLoader(
-        TransitionDataset(pool),
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=False,
-        generator=loader_generator,
-    )
+    replay_weights = None
+    if loss_weighted_replay and pool.pretrain_losses is not None:
+        # Hard-example oversampling keyed on honest (pre-train) losses; floor keeps
+        # every transition reachable.
+        pl = np.asarray(pool.pretrain_losses, dtype=np.float64).reshape(-1)
+        replay_weights = 0.25 * pl.mean() + pl
+    loaders = [
+        _member_loader(pool, batch_size, seed, i, ensemble_bootstrap, replay_weights)
+        for i in range(len(model.models))
+    ]
+    # Noise injection in physical units relative to the pool's state std.
+    noise_scale = float(input_noise_std) * float(np.std(pool.states)) if input_noise_std > 0 else 0.0
     last_losses = []
     for epoch in range(epochs):
         epoch_losses = []
-        for state, params, target in loader:
-            state = state.to(device)
-            params = params.to(device)
-            target = target.to(device)
-            for model_i, opt in zip(model.models, opts):
+        for batches in zip(*loaders):
+            for (state, params, target), model_i, opt in zip(batches, model.models, opts):
+                state = state.to(device)
+                params = params.to(device)
+                target = target.to(device)
+                if noise_scale > 0:
+                    state = state + noise_scale * torch.randn_like(state)
                 opt.zero_grad(set_to_none=True)
                 pred = model_i(state, params)
                 loss = torch.mean((pred - target) ** 2)
@@ -114,7 +155,7 @@ def train_surrogate(
     pool.losses = compute_transition_losses(model, pool, batch_size, device)
     if getattr(model, "n_models", 1) > 1:
         pool.uncertainty = compute_transition_uncertainty(model, pool, batch_size, device)
-    return {"train/loss": float(np.mean(last_losses[-max(1, len(loader)) :]))}
+    return {"train/loss": float(np.mean(last_losses[-max(1, len(loaders[0])) :]))}
 
 
 @torch.no_grad()
@@ -174,29 +215,66 @@ def train_ddpm(
     sample_weight_power: float = 1.0,
     epoch_callback=None,
     round_id: int = 0,
+    difficulty_from: str = "pretrain",
+    difficulty_stats: str = "ema",
+    difficulty_stats_momentum: float = 0.7,
+    self_train_weight: float = 1.0,
+    noise_prior: str = "white",
 ) -> dict[str, float]:
     if pool.losses is None:
         raise ValueError("Pool losses required before DDPM training.")
     if mode not in ("conditional_loss", "weighted_unconditional", "conditional_quantile"):
         raise ValueError(f"Unknown ddpm mode {mode}")
     ddpm.train()
-    losses = normalize_losses(pool_difficulty_signal(pool, loss_metric, difficulty_signal))
+    # Difficulty labels: by default use the PRE-train signal (previous round's
+    # surrogate evaluated on this still-unseen pool) — out-of-sample, not deflated
+    # by the surrogate overfitting its own training pool.
+    raw = pool_difficulty_signal(
+        pool, loss_metric, difficulty_signal, from_pretrain=str(difficulty_from) == "pretrain"
+    )
+    # Normalization stats tracked across rounds (EMA/frozen) so the physical meaning
+    # of "difficulty bin k" stays (approximately) stationary for the warm-started
+    # conditioning embedding.
+    lo_round = float(np.quantile(raw, 0.05))
+    hi_round = float(np.quantile(raw, 0.95))
+    if hasattr(ddpm, "update_difficulty_stats"):
+        lo, hi = ddpm.update_difficulty_stats(
+            lo_round, hi_round, mode=str(difficulty_stats), momentum=float(difficulty_stats_momentum)
+        )
+    else:
+        lo, hi = lo_round, hi_round
+    losses = ((raw - lo) / (hi - lo + 1e-8)).clip(0.0, 1.5).astype(np.float32)
     state_norm = ((pool.states - state_mean) / state_std).astype(np.float32)
+
+    # Coloured-noise prior: fit the base distribution to the spectrum of the
+    # physically-grounded (uniform-sourced) states only — never to the generator's
+    # own previous outputs (anti-self-feeding).
+    if str(noise_prior) == "spectrum" and hasattr(ddpm, "set_noise_psd"):
+        src = pool.source if pool.source is not None else np.zeros(len(pool), dtype=np.int8)
+        ref = state_norm[src == 0]
+        if len(ref) >= 32:
+            sel = ref[np.random.default_rng(round_id).choice(len(ref), size=min(4096, len(ref)), replace=False)]
+            ddpm.set_noise_psd(torch.from_numpy(sel), momentum=float(difficulty_stats_momentum))
+
     needs_params = ddpm.use_param_cond or ddpm.generate_params
     if needs_params:
         param_scaled = (2.0 * pde.normalize_params(pool.params) - 1.0).astype(np.float32)
     else:
         param_scaled = np.zeros((len(pool), max(1, ddpm.param_dim)), dtype=np.float32)
 
-    # Quantile-bin conditioning: bin this round's pool losses, store edges on the
-    # model so generation maps realized losses back to the same bins, and use a
-    # balanced sampler so every difficulty bin contributes equal signal.
+    # Quantile-bin conditioning: bin this round's normalized difficulty, store edges
+    # on the model (buffer-backed, checkpointed) so generation maps realized
+    # difficulty back to the same bins, and use a balanced sampler so every bin
+    # contributes equal signal.
     quantile_mode = mode == "conditional_quantile"
     if quantile_mode:
         if ddpm.n_quantiles <= 0:
             raise ValueError("mode=conditional_quantile requires ddpm.n_quantiles > 0")
         qbins, qedges = assign_quantile_bins(losses, ddpm.n_quantiles)
-        ddpm.quantile_edges = qedges  # consumed by the generation step
+        if hasattr(ddpm, "set_quantile_edges"):
+            ddpm.set_quantile_edges(qedges)
+        else:
+            ddpm.quantile_edges = qedges
         qbins_t = torch.from_numpy(qbins)
     else:
         qbins_t = torch.zeros(len(state_norm), dtype=torch.int64)
@@ -207,9 +285,17 @@ def train_ddpm(
         torch.from_numpy(param_scaled),
         qbins_t,
     )
+    # Sampler weights: balanced-per-bin (quantile mode) x anti-self-feed down-weight
+    # of generator-sourced states (the generator anchors to solver/uniform states).
+    weights = np.ones(len(state_norm), dtype=np.float64)
     if quantile_mode:
         counts = np.bincount(qbins, minlength=ddpm.n_quantiles).astype(np.float64)
         weights = (1.0 / np.clip(counts, 1.0, None))[qbins]
+    if pool.source is not None and float(self_train_weight) != 1.0:
+        weights = weights * np.where(np.asarray(pool.source) == 0, 1.0, float(self_train_weight))
+    if quantile_mode or float(self_train_weight) != 1.0:
+        if weights.sum() <= 0:
+            weights = np.ones(len(state_norm), dtype=np.float64)
         sampler = WeightedRandomSampler(torch.from_numpy(weights), num_samples=len(weights), replacement=True)
         loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler)
     else:
@@ -291,18 +377,28 @@ def pool_difficulty(raw_losses: np.ndarray, next_states: np.ndarray, metric: str
     return transform_transition_losses(raw_losses, metric)
 
 
-def pool_difficulty_signal(pool: TransitionPool, loss_metric: str, difficulty_signal: str) -> np.ndarray:
+def pool_difficulty_signal(
+    pool: TransitionPool, loss_metric: str, difficulty_signal: str, from_pretrain: bool = False
+) -> np.ndarray:
     """Raw per-transition difficulty used to bin the pool for quantile conditioning.
 
     difficulty_signal='ensemble_var' uses the ensemble disagreement (reducible/epistemic
     uncertainty); 'loss' uses the surrogate one-step error under loss_metric. Falls back to
     the loss signal if uncertainty is unavailable (e.g. ensemble_size == 1).
+
+    from_pretrain=True prefers the signals computed BEFORE the surrogate trained on this
+    pool (honest, out-of-sample difficulty); falls back to post-train signals if absent.
     """
     if str(difficulty_signal or "loss").lower() == "ensemble_var":
+        if from_pretrain and pool.pretrain_uncertainty is not None:
+            return np.asarray(pool.pretrain_uncertainty, dtype=np.float32)
         if pool.uncertainty is not None:
             return np.asarray(pool.uncertainty, dtype=np.float32)
         # No ensemble -> no disagreement signal; degrade gracefully to the loss signal.
-    return pool_difficulty(pool.losses, pool.next_states, loss_metric)
+    losses = pool.losses
+    if from_pretrain and pool.pretrain_losses is not None:
+        losses = pool.pretrain_losses
+    return pool_difficulty(losses, pool.next_states, loss_metric)
 
 
 def realized_difficulty(

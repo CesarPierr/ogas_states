@@ -164,6 +164,25 @@ def propose_conditioning_losses(
     raise ValueError(f"Unknown ddpm.loss_proposal {strategy!r}")
 
 
+def state_total_variation(states: np.ndarray) -> np.ndarray:
+    """Per-state periodic total variation (physical units), shape [N]."""
+    s = np.asarray(states, dtype=np.float32)[:, 0]
+    tv = np.abs(np.diff(s, axis=-1)).sum(axis=-1) + np.abs(s[:, 0] - s[:, -1])
+    return tv.astype(np.float32)
+
+
+@torch.no_grad()
+def ensemble_disagreement(surrogate, states: np.ndarray, params: np.ndarray, device, batch_size: int = 512) -> np.ndarray:
+    """Per-state ensemble disagreement (forward passes only; zero solver cost)."""
+    surrogate.eval()
+    out = []
+    for i in range(0, len(states), batch_size):
+        s = torch.from_numpy(np.asarray(states[i : i + batch_size], dtype=np.float32)).to(device)
+        p = torch.from_numpy(np.asarray(params[i : i + batch_size], dtype=np.float32)).to(device)
+        out.append(surrogate.uncertainty(s, p).cpu().numpy())
+    return np.concatenate(out).astype(np.float32)
+
+
 @torch.no_grad()
 def generate_states_and_params(
     ddpm: DDPM1D,
@@ -181,25 +200,38 @@ def generate_states_and_params(
     loss_condition_scale: float = 1.0,
     sample_strategy: str = "exp_bias",
     sample_strategy_temp: float = 0.5,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Generate states (physical units) and their PDE parameters from the DDPM.
+    surrogate=None,
+    candidate_factor: int = 1,
+    tv_gate_threshold: float = 0.0,
+    anchors_phys: np.ndarray | None = None,
+    sample_mode: str = "scratch",
+    edit_t0: float = 0.6,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Generate states (physical units), their PDE parameters, and the requested
+    difficulty bin per kept state (-1 where not applicable).
 
-    Depending on ddpm.param_mode the parameters are either sampled uniformly and used to
-    condition the state generation, jointly generated with the state, or sampled uniformly
-    and paired afterwards ("none"). The returned params are exactly the ones to feed the
-    solver and the surrogate.
-
-    In mode="conditional_quantile" the generator is conditioned on a discrete difficulty
-    bin sampled from `sample_strategy` (e.g. exp_bias biases toward hard bins).
+    Steering happens in two stages:
+      1. conditioning — quantile-bin label (mode="conditional_quantile") and, in
+         sample_mode="edit", SDEdit-style generation around real attractor anchors;
+      2. selection — with candidate_factor > 1 and a surrogate ensemble, generate
+         candidate_factor x more candidates, drop the unphysical ones (TV gate),
+         and keep the states with the highest ensemble disagreement. Selection by
+         REALIZED disagreement replaces weak conditioning as the steering mechanism
+         and costs zero extra solver calls.
     """
-    states_out, params_out = [], []
+    candidate_factor = max(1, int(candidate_factor))
+    use_edit = str(sample_mode) == "edit" and anchors_phys is not None and len(anchors_phys) > 0
+    anchors_norm = None
+    if use_edit:
+        anchors_norm = ((np.asarray(anchors_phys, dtype=np.float32) - state_mean) / state_std).astype(np.float32)
+
+    states_out, params_out, bins_out = [], [], []
     losses_flat = None if loss_values is None else np.asarray(loss_values, dtype=np.float32).reshape(-1)
     for start in range(0, n, batch_size):
         end = min(start + batch_size, n)
         b = end - start
 
-        valid_states = []
-        valid_params = []
+        valid_states, valid_params, valid_bins = [], [], []
         needed = b
         attempts = 0
         max_attempts = 10
@@ -207,75 +239,105 @@ def generate_states_and_params(
         while needed > 0 and attempts < max_attempts:
             attempts += 1
             attempt_t0 = time.perf_counter()
+            want = needed * candidate_factor
+
             loss_cond = None
             if mode == "conditional_loss" and loss_values is not None:
-                if losses_flat is not None and len(losses_flat) >= n:
-                    current_losses = losses_flat[start + (b - needed) : start + (b - needed) + needed]
-                elif losses_flat is not None and len(losses_flat) > 0:
-                    current_losses = rng.choice(losses_flat, size=needed, replace=True)
+                if losses_flat is not None and len(losses_flat) > 0:
+                    current_losses = rng.choice(losses_flat, size=want, replace=True)
                 else:
-                    current_losses = rng.uniform(0.5, 1.0, size=needed).astype(np.float32)
+                    current_losses = rng.uniform(0.5, 1.0, size=want).astype(np.float32)
                 current_losses = current_losses * float(loss_condition_scale)
-                loss_cond = torch.as_tensor(current_losses, dtype=torch.float32, device=device).view(needed, 1)
+                loss_cond = torch.as_tensor(current_losses, dtype=torch.float32, device=device).view(want, 1)
 
             quantile_label = None
+            ql = np.full(want, -1, dtype=np.int64)
             if mode == "conditional_quantile":
                 ql = sample_quantile_labels(
-                    sample_strategy, needed, ddpm.n_quantiles, rng, sample_strategy_temp
+                    sample_strategy, want, ddpm.n_quantiles, rng, sample_strategy_temp
                 )
                 quantile_label = torch.as_tensor(ql, dtype=torch.long, device=device)
 
+            edit_kwargs = {}
+            if use_edit:
+                anchor_idx = rng.choice(len(anchors_norm), size=want, replace=len(anchors_norm) < want)
+                edit_kwargs = {
+                    "init_state": torch.from_numpy(anchors_norm[anchor_idx]).to(device),
+                    "t_start": float(edit_t0),
+                }
+
             if ddpm.param_mode == "condition":
-                normed = sample_normalized_params(needed, ddpm.param_dim, rng, param_prior)
+                normed = sample_normalized_params(want, ddpm.param_dim, rng, param_prior)
                 param_scaled = torch.from_numpy(2.0 * normed - 1.0).to(device)
                 state_norm, _ = ddpm.sample(
-                    needed,
+                    want,
                     loss=loss_cond,
                     params=param_scaled,
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    **edit_kwargs,
                 )
                 params_phys = pde.denormalize_params(normed)
             elif ddpm.param_mode == "generate":
                 state_norm, p_scaled = ddpm.sample(
-                    needed,
+                    want,
                     loss=loss_cond,
                     params=None,
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    **edit_kwargs,
                 )
                 normed = ((p_scaled.clamp(-1.0, 1.0).cpu().numpy() + 1.0) / 2.0).astype(np.float32)
                 params_phys = pde.denormalize_params(normed)
             else:
                 state_norm, _ = ddpm.sample(
-                    needed,
+                    want,
                     loss=loss_cond,
                     params=None,
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    **edit_kwargs,
                 )
                 if param_prior == "uniform":
-                    params_phys = pde.sample_params_uniform(needed, rng)
+                    params_phys = pde.sample_params_uniform(want, rng)
                 else:
-                    normed = sample_normalized_params(needed, ddpm.param_dim, rng, param_prior)
+                    normed = sample_normalized_params(want, ddpm.param_dim, rng, param_prior)
                     params_phys = pde.denormalize_params(normed)
 
             state_phys = state_norm.cpu().numpy() * state_std + state_mean
 
-            good_indices = np.where(finite_rows(state_phys, params_phys))[0]
+            keep = finite_rows(state_phys, params_phys)
+            n_finite = int(keep.sum())
+            # Realism gate: drop candidates rougher than the physical reference.
+            n_gated = 0
+            if tv_gate_threshold > 0:
+                tv = state_total_variation(state_phys)
+                gate = keep & (tv <= float(tv_gate_threshold))
+                # never gate below what we need — relax to finite-only if too strict
+                if int(gate.sum()) >= min(needed, n_finite):
+                    n_gated = n_finite - int(gate.sum())
+                    keep = gate
+            idx = np.where(keep)[0]
+            # Selection: rank surviving candidates by ensemble disagreement.
+            if candidate_factor > 1 and surrogate is not None and len(idx) > needed:
+                dis = ensemble_disagreement(surrogate, state_phys[idx], params_phys[idx], device)
+                idx = idx[np.argsort(-dis)[:needed]]
+            else:
+                idx = idx[:needed]
             print(
                 f"ddpm generate batch {start}:{end} attempt={attempts} "
-                f"requested={needed} finite={len(good_indices)} "
+                f"requested={needed} candidates={want} finite={n_finite} gated_out={n_gated} kept={len(idx)} "
                 f"dt={time.perf_counter() - attempt_t0:.2f}s",
                 flush=True,
             )
-            if len(good_indices) > 0:
-                valid_states.append(state_phys[good_indices])
-                valid_params.append(params_phys[good_indices])
-                needed -= len(good_indices)
+            if len(idx) > 0:
+                valid_states.append(state_phys[idx])
+                valid_params.append(params_phys[idx])
+                valid_bins.append(ql[idx])
+                needed -= len(idx)
 
         if needed > 0:
             print(
@@ -287,11 +349,92 @@ def generate_states_and_params(
             fallback_params = pde.sample_params_uniform(needed, rng)
             valid_states.append(fallback_states)
             valid_params.append(fallback_params)
+            valid_bins.append(np.full(needed, -1, dtype=np.int64))
 
         states_out.append(np.concatenate(valid_states, axis=0)[:b].astype(np.float32))
         params_out.append(np.concatenate(valid_params, axis=0)[:b].astype(np.float32))
+        bins_out.append(np.concatenate(valid_bins, axis=0)[:b])
 
-    return np.concatenate(states_out, axis=0), np.concatenate(params_out, axis=0)
+    return (
+        np.concatenate(states_out, axis=0),
+        np.concatenate(params_out, axis=0),
+        np.concatenate(bins_out, axis=0).astype(np.int64),
+    )
+
+
+def _tube_perturbation(anchors: np.ndarray, rng: np.random.Generator, rho_min: float, rho_max: float, kmax: int) -> np.ndarray:
+    """Random low-wavenumber perturbations of real anchor states (the no-learning
+    tube baseline): k in 1..kmax with 1/k amplitudes, mean-zero, unit-RMS, scaled
+    per-state by rho * RMS(u) with rho ~ U[rho_min, rho_max]."""
+    anchors = np.asarray(anchors, dtype=np.float32)
+    n, _, L = anchors.shape
+    x = np.arange(L, dtype=np.float64) / L
+    pert = np.zeros((n, L), dtype=np.float64)
+    for k in range(1, int(kmax) + 1):
+        phases = rng.uniform(0.0, 2.0 * np.pi, size=(n, 1))
+        pert += (1.0 / k) * np.cos(2.0 * np.pi * k * x[None, :] + phases)
+    pert -= pert.mean(axis=1, keepdims=True)
+    pert /= np.sqrt((pert**2).mean(axis=1, keepdims=True)) + 1e-12
+    rho = rng.uniform(float(rho_min), float(rho_max), size=(n, 1))
+    rms_u = np.sqrt((anchors[:, 0].astype(np.float64) ** 2).mean(axis=1, keepdims=True))
+    out = anchors[:, 0] + (rho * np.maximum(rms_u, 1e-6) * pert).astype(np.float32)
+    return out[:, None, :].astype(np.float32)
+
+
+def _anchor_states(pools: list, previous: TransitionPool | None, rng: np.random.Generator, max_n: int = 4096) -> np.ndarray:
+    """Physically-grounded anchor states: prefer this round's fresh uniform half,
+    else the previous pool's uniform-sourced states, else the previous pool."""
+    cand = None
+    if pools:
+        cand = pools[0].states
+    elif previous is not None:
+        if previous.source is not None and (np.asarray(previous.source) == 0).any():
+            cand = previous.states[np.asarray(previous.source) == 0]
+        else:
+            cand = previous.states
+    if cand is None or len(cand) == 0:
+        raise ValueError("No anchor states available (empty uniform half and previous pool)")
+    idx = rng.choice(len(cand), size=min(max_n, len(cand)), replace=False)
+    return np.asarray(cand[idx], dtype=np.float32)
+
+
+@torch.no_grad()
+def make_strategy_transitions(
+    strategy: str,
+    pde: PDE1D,
+    surrogate,
+    anchors: np.ndarray,
+    n: int,
+    rng: np.random.Generator,
+    device: torch.device,
+    solver_batch_size: int,
+    tube_rho_min: float,
+    tube_rho_max: float,
+    tube_kmax: int,
+    candidate_factor: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generator-free baselines for the non-uniform half (1 solver step per kept state).
+
+    random_tube: anchors + random low-k perturbations (no learning, no selection).
+    mined_ic:    candidate_factor x random ICs, keep the top-n by ensemble
+                 disagreement (selection without generation).
+    """
+    if strategy == "random_tube":
+        anchor_idx = rng.choice(len(anchors), size=n, replace=len(anchors) < n)
+        states = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
+        params = pde.sample_params_uniform(n, rng)
+        return states, params
+    if strategy == "mined_ic":
+        want = n * max(2, int(candidate_factor))
+        cand_states = pde.sample_ic_uniform(want, rng)
+        cand_params = pde.sample_params_uniform(want, rng)
+        if surrogate is not None:
+            dis = ensemble_disagreement(surrogate, cand_states, cand_params, device)
+            keep = np.argsort(-dis)[:n]
+        else:
+            keep = np.arange(n)
+        return cand_states[keep].astype(np.float32), cand_params[keep].astype(np.float32)
+    raise ValueError(f"Unknown pool.strategy {strategy!r}")
 
 
 @torch.no_grad()
@@ -319,12 +462,59 @@ def make_mixed_pool(
     solver_batch_size: int = 256,
     sample_strategy: str = "exp_bias",
     sample_strategy_temp: float = 0.5,
+    surrogate=None,
+    strategy: str = "generator",
+    tube_rho_min: float = 0.05,
+    tube_rho_max: float = 0.5,
+    tube_kmax: int = 12,
+    sample_mode: str = "scratch",
+    edit_t0: float = 0.6,
+    candidate_factor: int = 1,
+    realism_tv_gate: float = 0.0,
 ) -> TransitionPool:
     n_uniform = int(round(n_traj * uniform_fraction))
     n_generated_traj = n_traj - n_uniform
     pools = []
     if n_uniform > 0:
         pools.append(make_uniform_pool(pde, n_uniform, steps, rng))
+
+    # Anchors + realism reference from physically-grounded states only.
+    anchors = None
+    tv_gate_threshold = 0.0
+    if n_generated_traj > 0:
+        anchors = _anchor_states(pools, previous, rng)
+        if realism_tv_gate > 0:
+            tv_gate_threshold = float(realism_tv_gate) * float(np.quantile(state_total_variation(anchors), 0.99))
+
+    # Generator-free baseline strategies fill the non-uniform half with single-step
+    # transitions at exactly one solver step per kept state (budget-matched).
+    if n_generated_traj > 0 and strategy in ("random_tube", "mined_ic"):
+        n_generated = n_generated_traj * steps
+        states0, params = make_strategy_transitions(
+            strategy, pde, surrogate, anchors, n_generated, rng, device, solver_batch_size,
+            tube_rho_min, tube_rho_max, tube_kmax, candidate_factor,
+        )
+        next_state = safe_step_transitions(
+            pde, states0, params, batch_size=solver_batch_size, progress_label=f"{strategy} transitions"
+        )
+        good = finite_rows(states0, params, next_state)
+        n_bad = int((~good).sum())
+        if n_bad > 0:
+            print(f"WARNING: {strategy} produced {n_bad} nonfinite transitions; replacing with uniform.", file=sys.stderr)
+            fb = make_uniform_pool(pde, max(1, int(np.ceil(n_bad / max(steps, 1)))), 1, rng)
+            states0[~good] = fb.states[:n_bad]
+            params[~good] = fb.params[:n_bad]
+            next_state[~good] = fb.next_states[:n_bad]
+        src = np.ones(n_generated, dtype=np.int8)
+        if n_bad > 0:
+            src[~good] = 2
+        pools.append(
+            TransitionPool(
+                states0.astype(np.float32), params.astype(np.float32), next_state.astype(np.float32),
+                source=src,
+            )
+        )
+        return _merge_pools(pools)
     generated_pool_mode = str(generated_pool_mode or "trajectory")
     if n_generated_traj > 0 and generated_pool_mode == "trajectory":
         needed = n_generated_traj
@@ -345,7 +535,7 @@ def make_mixed_pool(
                 qmin=loss_quantile_min,
                 qmax=loss_quantile_max,
             )
-            states_attempt, params_attempt = generate_states_and_params(
+            states_attempt, params_attempt, _ = generate_states_and_params(
                 ddpm,
                 needed,
                 ddpm_mode,
@@ -410,32 +600,23 @@ def make_mixed_pool(
         pools.append(generated_pool)
     elif n_generated_traj > 0 and generated_pool_mode == "transition":
         n_generated = n_generated_traj * steps
-        
+
         needed = n_generated
         valid_states0 = []
         valid_params = []
         valid_next_states = []
-        valid_proposed_losses = []
+        valid_bins = []
+        valid_sources = []
         attempts = 0
         max_attempts = 10
-        
+
         while needed > 0 and attempts < max_attempts:
             attempts += 1
-            current_loss_values = propose_conditioning_losses(
-                previous.losses,
-                needed,
-                rng,
-                strategy=loss_proposal,
-                loss_metric=loss_metric,
-                qmin=loss_quantile_min,
-                qmax=loss_quantile_max,
-            )
-                
-            states_attempt, params_attempt = generate_states_and_params(
+            states_attempt, params_attempt, bins_attempt = generate_states_and_params(
                 ddpm,
                 needed,
                 ddpm_mode,
-                current_loss_values if ddpm_mode == "conditional_loss" else None,
+                previous.losses if ddpm_mode == "conditional_loss" else None,
                 pde,
                 state_mean,
                 state_std,
@@ -447,8 +628,14 @@ def make_mixed_pool(
                 loss_condition_scale=loss_condition_scale,
                 sample_strategy=sample_strategy,
                 sample_strategy_temp=sample_strategy_temp,
+                surrogate=surrogate,
+                candidate_factor=candidate_factor,
+                tv_gate_threshold=tv_gate_threshold,
+                anchors_phys=anchors,
+                sample_mode=sample_mode,
+                edit_t0=edit_t0,
             )
-            
+
             next_state_attempt = safe_step_transitions(
                 pde,
                 states_attempt,
@@ -467,7 +654,8 @@ def make_mixed_pool(
                 valid_states0.append(states_attempt[good_indices])
                 valid_params.append(params_attempt[good_indices])
                 valid_next_states.append(next_state_attempt[good_indices])
-                valid_proposed_losses.append(current_loss_values[good_indices])
+                valid_bins.append(bins_attempt[good_indices])
+                valid_sources.append(np.ones(len(good_indices), dtype=np.int8))
                 needed -= len(good_indices)
 
         if needed > 0:
@@ -478,48 +666,48 @@ def make_mixed_pool(
                 file=sys.stderr,
             )
             fallback_pool = make_uniform_pool(pde, needed, 1, rng)
-            fallback_states = fallback_pool.states
-            fallback_params = fallback_pool.params
-            fallback_next_states = fallback_pool.next_states
-            fallback_loss_values = propose_conditioning_losses(
-                previous.losses,
-                needed,
-                rng,
-                strategy=loss_proposal,
-                loss_metric=loss_metric,
-                qmin=loss_quantile_min,
-                qmax=loss_quantile_max,
-            )
-
-            valid_states0.append(fallback_states)
-            valid_params.append(fallback_params)
-            valid_next_states.append(fallback_next_states)
-            valid_proposed_losses.append(fallback_loss_values)
+            valid_states0.append(fallback_pool.states)
+            valid_params.append(fallback_pool.params)
+            valid_next_states.append(fallback_pool.next_states)
+            valid_bins.append(np.full(len(fallback_pool), -1, dtype=np.int64))
+            valid_sources.append(np.full(len(fallback_pool), 2, dtype=np.int8))
 
         states0 = np.concatenate(valid_states0, axis=0)[:n_generated].astype(np.float32)
         params = np.concatenate(valid_params, axis=0)[:n_generated].astype(np.float32)
         next_state = np.concatenate(valid_next_states, axis=0)[:n_generated].astype(np.float32)
-        loss_values = np.concatenate(valid_proposed_losses, axis=0)[:n_generated].astype(np.float32)
+        bins = np.concatenate(valid_bins, axis=0)[:n_generated].astype(np.int64)
+        sources = np.concatenate(valid_sources, axis=0)[:n_generated].astype(np.int8)
 
         pools.append(
             TransitionPool(
                 states0,
                 params,
                 next_state,
-                source=np.ones((n_generated,), dtype=np.int8),
-                proposed_losses=loss_values.reshape(-1).astype(np.float32),
+                source=sources,
+                target_bins=bins,
             )
         )
     elif n_generated_traj > 0:
         raise ValueError(f"Unknown ddpm.generated_pool_mode {generated_pool_mode!r}")
+    return _merge_pools(pools)
+
+
+def _merge_pools(pools: list) -> TransitionPool:
     states = np.concatenate([p.states for p in pools], axis=0)
     params = np.concatenate([p.params for p in pools], axis=0)
     next_states = np.concatenate([p.next_states for p in pools], axis=0)
-    source = np.concatenate([p.source for p in pools if p.source is not None], axis=0)
+    source = np.concatenate(
+        [p.source if p.source is not None else np.zeros(len(p), dtype=np.int8) for p in pools], axis=0
+    )
     proposed = np.full((len(states),), np.nan, dtype=np.float32)
+    bins = np.full((len(states),), -1, dtype=np.int64)
     offset = 0
     for p in pools:
         if p.proposed_losses is not None:
             proposed[offset : offset + len(p)] = p.proposed_losses.reshape(-1)
+        if p.target_bins is not None:
+            bins[offset : offset + len(p)] = np.asarray(p.target_bins).reshape(-1)
         offset += len(p)
-    return TransitionPool(states, params, next_states, source=source, proposed_losses=proposed)
+    return TransitionPool(
+        states, params, next_states, source=source, proposed_losses=proposed, target_bins=bins
+    )

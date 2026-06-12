@@ -36,6 +36,11 @@ def save_checkpoint(
             "pretrain_losses": None
             if pool.pretrain_losses is None
             else torch.from_numpy(pool.pretrain_losses),
+            "uncertainty": None if pool.uncertainty is None else torch.from_numpy(pool.uncertainty),
+            "pretrain_uncertainty": None
+            if pool.pretrain_uncertainty is None
+            else torch.from_numpy(pool.pretrain_uncertainty),
+            "target_bins": None if pool.target_bins is None else torch.from_numpy(pool.target_bins),
         },
         "history": history,
         "numpy_rng_state": rng.bit_generator.state,
@@ -66,7 +71,14 @@ def load_checkpoint(path: Path, model, ddpm, rng: np.random.Generator, device: t
         pretrain_losses=None
         if p.get("pretrain_losses") is None
         else p["pretrain_losses"].cpu().numpy(),
+        uncertainty=None if p.get("uncertainty") is None else p["uncertainty"].cpu().numpy(),
+        pretrain_uncertainty=None
+        if p.get("pretrain_uncertainty") is None
+        else p["pretrain_uncertainty"].cpu().numpy(),
+        target_bins=None if p.get("target_bins") is None else p["target_bins"].cpu().numpy(),
     )
+    if hasattr(ddpm, "restore_generator_state"):
+        ddpm.restore_generator_state()
     rng.bit_generator.state = payload["numpy_rng_state"]
     torch.set_rng_state(payload["torch_rng_state"].cpu())
     if torch.cuda.is_available() and "torch_cuda_rng_state" in payload:

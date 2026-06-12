@@ -1,0 +1,76 @@
+seed: 7
+device: cpu
+output_dir: /tmp/smoke_v3/base
+
+pde:
+  name: ks
+  resolution: 128
+  domain_length: 64.0
+  dt: 0.05
+  param_ranges:
+    - [0.5, 4.0]
+    - [10.0, 100.0]
+  param_log_scale: [false, false]
+  n_substeps: 5
+  n_warmup: 4
+  ic:
+    N: 10
+    lmin: 1
+    lmax: 10
+    amplitude: 1.0
+
+pool:
+  rounds: 2
+  trajectory_steps: 10
+  n_trajectories: 8
+  uniform_fraction: 0.5
+  strategy: generator
+
+surrogate:
+  hidden: 8
+  depth: 4
+  ensemble_size: 2
+  ensemble_bootstrap: true
+  epochs_per_round: 2
+  batch_size: 32
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  steps: 8
+  train_epochs: 2
+  batch_size: 32
+  lr: 0.0002
+  hidden: 32
+  residual_blocks: 1
+  kernel_size: 5
+  n_quantiles: 10
+  sample_strategy: top_half
+  difficulty_signal: ensemble_var
+  difficulty_from: pretrain
+  difficulty_stats: ema
+  self_train_weight: 0.3
+  noise_prior: spectrum
+  sample_mode: scratch
+  edit_t0: 0.6
+  candidate_factor: 2
+  realism_tv_gate: 3.0
+  sample_batch_size: 64
+  generated_pool_mode: transition
+  solver_batch_size: 64
+
+validation:
+  n_trajectories: 8
+  trajectory_steps: 10
+  quantiles: [0.5, 0.9]
+  rollout_steps: 5
+  path: /tmp/smoke_v3/validation.npz
+  epoch_n_trajectories: 8
+
+wandb:
+  enabled: false

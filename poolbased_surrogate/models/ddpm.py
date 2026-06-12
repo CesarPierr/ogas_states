@@ -72,7 +72,73 @@ def _build_conv_net(in_channels: int, hidden: int, kernel_size: int, n_residual_
     )
 
 
-class DDPM1D(nn.Module):
+class GeneratorStateMixin:
+    """Persistent conditioning state shared by the generators.
+
+    Registers buffers (so they survive checkpoint save/load) for:
+      - quantile bin edges of the difficulty signal,
+      - the EMA/frozen q05/q95 normalization stats of the difficulty signal,
+      - the sqrt power-spectral-density profile of the coloured-noise base prior.
+    """
+
+    def _init_generator_state(self, resolution: int, n_quantiles: int) -> None:
+        self.register_buffer("quantile_edges_buf", torch.zeros(max(n_quantiles + 1, 1)))
+        self.register_buffer("difficulty_lo", torch.tensor(0.0))
+        self.register_buffer("difficulty_hi", torch.tensor(0.0))
+        self.register_buffer("difficulty_stats_ready", torch.tensor(0.0))
+        self.register_buffer("noise_psd_sqrt", torch.zeros(resolution // 2 + 1))
+        self.register_buffer("noise_psd_ready", torch.tensor(0.0))
+        self.quantile_edges = None  # numpy mirror consumed by generator_eval
+
+    def set_quantile_edges(self, edges) -> None:
+        import numpy as _np
+
+        edges = _np.asarray(edges, dtype=_np.float32).reshape(-1)
+        self.quantile_edges = edges
+        if edges.shape[0] == self.quantile_edges_buf.shape[0]:
+            self.quantile_edges_buf.copy_(torch.from_numpy(edges).to(self.quantile_edges_buf.device))
+
+    def restore_generator_state(self) -> None:
+        """Re-populate the numpy mirrors after a checkpoint load."""
+        if float(self.quantile_edges_buf.abs().sum()) > 0:
+            self.quantile_edges = self.quantile_edges_buf.detach().cpu().numpy()
+
+    def update_difficulty_stats(self, lo: float, hi: float, mode: str = "ema", momentum: float = 0.7) -> tuple[float, float]:
+        """Track the q05/q95 normalization stats across rounds; returns the stats to use."""
+        if mode == "per_round" or float(self.difficulty_stats_ready) == 0.0:
+            self.difficulty_lo.fill_(float(lo))
+            self.difficulty_hi.fill_(float(hi))
+            self.difficulty_stats_ready.fill_(1.0)
+        elif mode == "ema":
+            m = float(momentum)
+            self.difficulty_lo.mul_(m).add_((1.0 - m) * float(lo))
+            self.difficulty_hi.mul_(m).add_((1.0 - m) * float(hi))
+        # mode == "frozen": keep the stored stats untouched
+        return float(self.difficulty_lo), float(self.difficulty_hi)
+
+    def set_noise_psd(self, ref_states: torch.Tensor, momentum: float = 0.7) -> None:
+        """Fit the coloured-noise prior to reference (z-normalised) states [N, 1, L]."""
+        spec = torch.fft.rfft(ref_states.float().squeeze(1), dim=-1)
+        psd_sqrt = (spec.real**2 + spec.imag**2).mean(dim=0).clamp_min(1e-12).sqrt()
+        psd_sqrt = psd_sqrt.to(self.noise_psd_sqrt.device)
+        if float(self.noise_psd_ready) > 0:
+            self.noise_psd_sqrt.mul_(momentum).add_((1.0 - momentum) * psd_sqrt)
+        else:
+            self.noise_psd_sqrt.copy_(psd_sqrt)
+            self.noise_psd_ready.fill_(1.0)
+
+    def _base_noise(self, n: int, device, temperature: float = 1.0) -> torch.Tensor:
+        """Draw base noise: white N(0,I), or unit-variance coloured Gaussian when a PSD is set."""
+        white = torch.randn(n, 1, self.resolution, device=device)
+        if float(self.noise_psd_ready) == 0.0:
+            return temperature * white
+        spec = torch.fft.rfft(white.squeeze(1), dim=-1) * self.noise_psd_sqrt.to(device)
+        x = torch.fft.irfft(spec, n=self.resolution, dim=-1).unsqueeze(1)
+        x = x / (x.std(dim=(1, 2), keepdim=True) + 1e-8)
+        return temperature * x
+
+
+class DDPM1D(GeneratorStateMixin, nn.Module):
     """1D state diffusion model with optional loss/quantile conditioning and PDE-parameter handling.
 
     param_mode:
@@ -132,6 +198,7 @@ class DDPM1D(nn.Module):
         self.register_buffer("beta", beta)
         self.register_buffer("alpha", alpha)
         self.register_buffer("alpha_bar", alpha_bar)
+        self._init_generator_state(self.resolution, self.n_quantiles)
 
     def _loss_features(self, loss: torch.Tensor | None, quantile_label: torch.Tensor | None) -> torch.Tensor | None:
         if self.n_quantiles > 0:
@@ -220,7 +287,11 @@ class DDPM1D(nn.Module):
         device: torch.device | None = None,
         temperature: float = 1.0,
         quantile_label: torch.Tensor | None = None,
+        init_state: torch.Tensor | None = None,
+        t_start: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if init_state is not None and t_start > 0.0:
+            raise NotImplementedError("edit-mode sampling is only implemented for FlowMatching1D")
         device = device or self.beta.device
         temperature = float(temperature)
         x = temperature * torch.randn(n, 1, self.resolution, device=device)
@@ -252,12 +323,18 @@ class DDPM1D(nn.Module):
         return x, p
 
 
-class FlowMatching1D(nn.Module):
+class FlowMatching1D(GeneratorStateMixin, nn.Module):
     """Conditional 1D flow matching generator.
 
     Shares the same public API as DDPM1D.  Loss conditioning modes:
       - n_quantiles == 0: scalar float loss in [0, 1.5].
       - n_quantiles > 0:  integer quantile label routed through nn.Embedding.
+
+    Distribution priors (GeneratorStateMixin): when a noise PSD has been set via
+    set_noise_psd, both training and sampling use a coloured Gaussian base whose
+    spectrum matches the physical states, removing the white-noise high-frequency
+    mismatch. sample() additionally supports SDEdit-style "edit" generation from
+    real anchor states (init_state + t_start).
     """
 
     def __init__(
@@ -299,6 +376,7 @@ class FlowMatching1D(nn.Module):
                 nn.Linear(self.temb_dim + n_loss + 1, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
             )
             self.param_out = nn.Linear(hidden, self.param_dim)
+        self._init_generator_state(self.resolution, self.n_quantiles)
 
     def _time_embedding(self, t: torch.Tensor) -> torch.Tensor:
         return timestep_embedding(t.float() * max(self.steps - 1, 1), self.temb_dim)
@@ -363,7 +441,8 @@ class FlowMatching1D(nn.Module):
         bsz = clean.shape[0]
         t = torch.rand((bsz,), device=clean.device)
         t_state = t.view(bsz, 1, 1)
-        noise = torch.randn_like(clean)
+        # Base distribution matches sampling: coloured (physical-spectrum) noise when set.
+        noise = self._base_noise(bsz, clean.device)
         mixed = (1.0 - t_state) * noise + t_state * clean
         target_v = clean - noise
         if self.generate_params:
@@ -392,20 +471,38 @@ class FlowMatching1D(nn.Module):
         device: torch.device | None = None,
         temperature: float = 1.0,
         quantile_label: torch.Tensor | None = None,
+        init_state: torch.Tensor | None = None,
+        t_start: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Integrate the learned velocity field from base noise (or, in edit mode,
+        from a partially re-noised real anchor) to the data distribution.
+
+        Edit mode (init_state + t_start in (0, 1)): x(t0) = (1-t0)*noise + t0*anchor,
+        integrated over [t0, 1]. The anchor must already be z-normalised. Smaller
+        t_start = larger deviation from the anchor.
+        """
         device = device or next(self.parameters()).device
         temperature = float(temperature)
-        x = temperature * torch.randn(n, 1, self.resolution, device=device)
         if loss is not None:
             loss = loss.to(device).view(n, 1)
         if quantile_label is not None:
             quantile_label = quantile_label.to(device).long()
         if self.use_param_cond and params is not None:
             params = params.to(device).view(n, self.param_dim)
+
+        if init_state is not None and t_start > 0.0:
+            t0 = min(float(t_start), 0.95)
+            anchor = init_state.to(device).view(n, 1, self.resolution).float()
+            x = (1.0 - t0) * self._base_noise(n, device, temperature) + t0 * anchor
+        else:
+            t0 = 0.0
+            x = self._base_noise(n, device, temperature)
+
         p = temperature * torch.randn(n, self.param_dim, device=device) if self.generate_params else None
-        dt = 1.0 / max(self.steps, 1)
-        for step in range(self.steps):
-            t = torch.full((n,), step / max(self.steps - 1, 1), device=device, dtype=torch.float32)
+        n_int = max(1, int(round((1.0 - t0) * self.steps)))
+        dt = (1.0 - t0) / n_int
+        for i in range(n_int):
+            t = torch.full((n,), t0 + i * dt, device=device, dtype=torch.float32)
             state_in = p if self.generate_params else params
             v, pv = self(x, t, loss, state_in, quantile_label)
             x = x + dt * v

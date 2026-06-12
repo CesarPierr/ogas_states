@@ -28,6 +28,17 @@ class PoolConfig:
     trajectory_steps: int = 75
     n_trajectories: int = 64
     uniform_fraction: float = 0.25
+    # How the non-uniform half of the pool is filled:
+    #   "generator"   -> difficulty-conditioned generative model (the method)
+    #   "random_tube" -> attractor anchors + random low-wavenumber perturbations
+    #                    (no learning; the decisive generator-necessity baseline)
+    #   "mined_ic"    -> draw candidate_factor x random ICs (free), keep the ones with
+    #                    highest ensemble disagreement, solver-label only those
+    #                    (selection-without-generation baseline at matched solver budget)
+    strategy: str = "generator"
+    tube_rho_min: float = 0.05   # random_tube: relative perturbation radius range
+    tube_rho_max: float = 0.5
+    tube_kmax: int = 12          # random_tube: highest perturbed wavenumber
 
 
 @dataclass
@@ -41,6 +52,17 @@ class SurrogateConfig:
     lr: float = 3e-4
     weight_decay: float = 1e-5
     difference_weight: float = 0.3
+    # Ensemble decorrelation: each member gets its own shuffled batch order, and
+    # optionally a bootstrap resample of the pool, so disagreement reflects more
+    # than initialization noise.
+    ensemble_bootstrap: bool = True
+    # Gaussian input-noise injection during training, in units of the state std
+    # (0 = off). With uniform_fraction=1.0 + ddpm.enabled=false this is the
+    # noise-injection baseline (Sanchez-Gonzalez et al. style).
+    input_noise_std: float = 0.0
+    # Loss-weighted replay: oversample hard transitions (by pretrain loss) during
+    # surrogate training. Hard-mining baseline at zero extra solver cost.
+    loss_weighted_replay: bool = False
 
 
 @dataclass
@@ -82,6 +104,49 @@ class DDPMConfig:
     # top1, top2, top3, top5, top_half, exp_bias, uniform.
     sample_strategy: str = "exp_bias"
     sample_strategy_temp: float = 0.5
+    # --- conditioning-signal hygiene -------------------------------------------------
+    # Which losses label difficulty for generator binning:
+    #   "pretrain"  -> previous round's surrogate on this (unseen) pool: honest,
+    #                  out-of-sample difficulty
+    #   "posttrain" -> just-trained surrogate on its own training pool (legacy;
+    #                  deflated by overfit)
+    difficulty_from: str = "pretrain"
+    # Normalization statistics for the difficulty signal across rounds:
+    #   "per_round" -> recompute q05/q95 each round (legacy; bin k drifts in meaning)
+    #   "ema"       -> exponential moving average of q05/q95 (smooth, stationary-ish)
+    #   "frozen"    -> freeze stats at the first generator round
+    difficulty_stats: str = "ema"
+    difficulty_stats_momentum: float = 0.7
+    # --- anti-self-feeding -----------------------------------------------------------
+    # Relative weight of generator-sourced pool states (source!=0) in the generator's
+    # OWN training set. 1.0 = legacy (generator half-trains on its own previous
+    # outputs); 0.3 anchors training to solver/uniform states; 0.0 = never train on
+    # own outputs.
+    self_train_weight: float = 0.3
+    # --- distribution prior ----------------------------------------------------------
+    # Base distribution of the flow/diffusion sampler:
+    #   "white"    -> N(0, I) (legacy)
+    #   "spectrum" -> coloured Gaussian matched to the mean power spectrum of the
+    #                 UNIFORM-sourced pool states (physical prior; used in both
+    #                 training and sampling so there is no train/sample mismatch)
+    noise_prior: str = "spectrum"
+    # Sampling mode:
+    #   "scratch" -> integrate from pure base noise (legacy)
+    #   "edit"    -> SDEdit-style: start from a real attractor anchor partially
+    #                re-noised to time edit_t0 and integrate to 1 with difficulty
+    #                conditioning. Generates difficulty-targeted states NEAR the
+    #                data manifold; deviation radius is controlled by edit_t0.
+    sample_mode: str = "scratch"
+    edit_t0: float = 0.6
+    # --- oversample-then-reject ------------------------------------------------------
+    # Generate candidate_factor x more candidate states than needed, score them with
+    # the surrogate ensemble's disagreement (forward passes only, zero solver cost),
+    # keep the top 1/candidate_factor, and only then pay the solver step. Selection
+    # by realized disagreement replaces (weak) conditioning as the steering mechanism.
+    candidate_factor: int = 1
+    # Realism gate applied before disagreement ranking: drop candidates whose total
+    # variation exceeds gate x the p99 TV of uniform-sourced pool states (0 = off).
+    realism_tv_gate: float = 0.0
 
 
 @dataclass

@@ -13,10 +13,13 @@ class TransitionPool:
     params: np.ndarray
     next_states: np.ndarray
     losses: np.ndarray | None = None
+    # source codes: 0 = uniform trajectory, 1 = generated/strategy state, 2 = fallback-to-uniform
     source: np.ndarray | None = None
     proposed_losses: np.ndarray | None = None
     pretrain_losses: np.ndarray | None = None
-    uncertainty: np.ndarray | None = None  # per-transition ensemble disagreement
+    uncertainty: np.ndarray | None = None  # per-transition ensemble disagreement (post-train)
+    pretrain_uncertainty: np.ndarray | None = None  # disagreement before training on this pool
+    target_bins: np.ndarray | None = None  # quantile bin actually requested per generated state (-1 = n/a)
 
     @classmethod
     def from_trajectories(
@@ -47,6 +50,8 @@ class TransitionPool:
         self.proposed_losses = other.proposed_losses
         self.pretrain_losses = other.pretrain_losses
         self.uncertainty = other.uncertainty
+        self.pretrain_uncertainty = other.pretrain_uncertainty
+        self.target_bins = other.target_bins
 
     def __len__(self) -> int:
         return int(self.states.shape[0])

@@ -99,6 +99,7 @@ def maybe_wandb(cfg, run_id: str | None):
         "rollout_figures",
         "generator_metrics",
         "timing",
+        "hard_val",
     ):
         run.define_metric(f"{namespace}/*", step_metric="round")
 

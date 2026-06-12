@@ -37,6 +37,33 @@ def al4pde_traj_to_numpy(traj: torch.Tensor) -> np.ndarray:
     return traj.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32)
 
 
+class SqueezeNumpyWrapper:
+    def __init__(self, arr, is_params=False):
+        self.arr = arr
+        self.is_params = is_params
+
+    def squeeze(self):
+        if self.is_params:
+            return self.arr.reshape((1,))
+        else:
+            return self.arr.reshape((1, -1))
+
+
+class SqueezeTensorWrapper:
+    def __init__(self, tensor, is_params=False):
+        self.tensor = tensor
+        self.is_params = is_params
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return SqueezeNumpyWrapper(self.tensor.cpu().numpy(), self.is_params)
+
+
 class AL4PDE1D:
     def __init__(self, cfg):
         ensure_al4pde_paths()
@@ -195,12 +222,26 @@ class AL4PDE1D:
         if steps not in self._sim_cache:
             self._sim_cache[steps] = self.simulator(steps)
         sim = self._sim_cache[steps]
-        ic = numpy_to_al4pde_ic(states)
-        pde_params = torch.from_numpy(params.astype(np.float32))
-        grid = self.grid(len(states))
-        with torch.no_grad():
-            traj, _, _ = sim(ic, pde_params, grid)
-        full = al4pde_traj_to_numpy(traj)  # [B, steps*n_sub+1, 1, N]
+        if self.is_burgers:
+            # Burgers solver in AL4PDE only supports batch_size=1 due to a JAX shape mismatch in adaptive dt
+            trajs = []
+            for i in range(len(states)):
+                ic_i = numpy_to_al4pde_ic(states[i:i+1])
+                pde_params_i = torch.from_numpy(params[i:i+1].astype(np.float32))
+                grid_i = self.grid(1)
+                wrapped_ic = SqueezeTensorWrapper(ic_i, is_params=False)
+                wrapped_params = SqueezeTensorWrapper(pde_params_i, is_params=True)
+                with torch.no_grad():
+                    traj_i, _, _ = sim(wrapped_ic, wrapped_params, grid_i)
+                trajs.append(al4pde_traj_to_numpy(traj_i))
+            full = np.concatenate(trajs, axis=0)
+        else:
+            ic = numpy_to_al4pde_ic(states)
+            pde_params = torch.from_numpy(params.astype(np.float32))
+            grid = self.grid(len(states))
+            with torch.no_grad():
+                traj, _, _ = sim(ic, pde_params, grid)
+            full = al4pde_traj_to_numpy(traj)  # [B, steps*n_sub+1, 1, N]
         if self.n_substeps > 1:
             return full[:, :: self.n_substeps]  # [B, steps+1, 1, N]
         return full

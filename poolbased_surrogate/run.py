@@ -36,7 +36,12 @@ from .models.ddpm import DDPM1D, FlowMatching1D
 from .models.surrogate import build_surrogate
 from .pde import PDE1D
 from .pool import make_mixed_pool, make_uniform_pool
-from .train import compute_transition_losses, train_ddpm, train_surrogate
+from .train import (
+    compute_transition_losses,
+    compute_transition_uncertainty,
+    train_ddpm,
+    train_surrogate,
+)
 from .wandb_logging import log_wandb_diagnostics, make_epoch_callback, maybe_wandb
 
 
@@ -195,8 +200,15 @@ def main(argv: list[str] | None = None) -> None:
     pool = make_uniform_pool(pde, cfg.pool.n_trajectories, cfg.pool.trajectory_steps, rng)
     history: list[dict[str, float]] = []
     wandb_run_id = uuid.uuid4().hex
-    if not cfg.ddpm.enabled and cfg.pool.uniform_fraction < 1.0:
-        raise ValueError("ddpm.enabled=false requires pool.uniform_fraction=1.0")
+    if (
+        not cfg.ddpm.enabled
+        and cfg.pool.uniform_fraction < 1.0
+        and str(cfg.pool.strategy) == "generator"
+    ):
+        raise ValueError(
+            "ddpm.enabled=false with pool.strategy=generator requires pool.uniform_fraction=1.0 "
+            "(use pool.strategy=random_tube or mined_ic for generator-free mixed pools)"
+        )
     if args.resume and not args.fresh and checkpoint.exists():
         start_round, pool, history, wandb_run_id = load_checkpoint(checkpoint, model, ddpm, rng, device)
         print(f"resumed from {checkpoint} at round {start_round}")
@@ -238,6 +250,15 @@ def main(argv: list[str] | None = None) -> None:
                 solver_batch_size=cfg.ddpm.solver_batch_size,
                 sample_strategy=cfg.ddpm.sample_strategy,
                 sample_strategy_temp=cfg.ddpm.sample_strategy_temp,
+                surrogate=model,
+                strategy=cfg.pool.strategy,
+                tube_rho_min=cfg.pool.tube_rho_min,
+                tube_rho_max=cfg.pool.tube_rho_max,
+                tube_kmax=cfg.pool.tube_kmax,
+                sample_mode=cfg.ddpm.sample_mode,
+                edit_t0=cfg.ddpm.edit_t0,
+                candidate_factor=cfg.ddpm.candidate_factor,
+                realism_tv_gate=cfg.ddpm.realism_tv_gate,
             )
             finish_phase("make_pool", phase_start)
         else:
@@ -246,6 +267,12 @@ def main(argv: list[str] | None = None) -> None:
         phase_start = time.perf_counter()
         pretrain_losses = compute_transition_losses(model, pool, cfg.surrogate.batch_size, device)
         pool.pretrain_losses = pretrain_losses
+        if getattr(model, "n_models", 1) > 1:
+            # Honest (out-of-sample) disagreement before the surrogate sees this pool;
+            # used as the generator's difficulty label when difficulty_from=pretrain.
+            pool.pretrain_uncertainty = compute_transition_uncertainty(
+                model, pool, cfg.surrogate.batch_size, device
+            )
         finish_phase("pretrain_losses", phase_start)
         print(f"round {round_id}: training surrogate", flush=True)
         phase_start = time.perf_counter()
@@ -262,6 +289,9 @@ def main(argv: list[str] | None = None) -> None:
             ),
             round_id=round_id,
             seed=cfg.seed + round_id,
+            ensemble_bootstrap=cfg.surrogate.ensemble_bootstrap,
+            input_noise_std=cfg.surrogate.input_noise_std,
+            loss_weighted_replay=cfg.surrogate.loss_weighted_replay,
         )
         finish_phase("surrogate_train", phase_start)
         ddpm_metrics = {}
@@ -289,6 +319,11 @@ def main(argv: list[str] | None = None) -> None:
                     run, model, validation, cfg, device, round_id, "ddpm_epoch"
                 ),
                 round_id=round_id,
+                difficulty_from=cfg.ddpm.difficulty_from,
+                difficulty_stats=cfg.ddpm.difficulty_stats,
+                difficulty_stats_momentum=cfg.ddpm.difficulty_stats_momentum,
+                self_train_weight=cfg.ddpm.self_train_weight,
+                noise_prior=cfg.ddpm.noise_prior,
             )
             finish_phase("generator_train", phase_start)
         gen_eval_metrics: dict[str, float] = {}
@@ -365,16 +400,23 @@ def main(argv: list[str] | None = None) -> None:
             except Exception as exc:
                 print(f"wandb diagnostics failed at round {round_id}: {exc}", file=sys.stderr)
         phase_start = time.perf_counter()
-        np.savez_compressed(
-            out / f"pool_round_{round_id}.npz",
-            states=pool.states,
-            params=pool.params,
-            next_states=pool.next_states,
-            losses=pool.losses,
-            source=pool.source,
-            proposed_losses=pool.proposed_losses,
-            pretrain_losses=pool.pretrain_losses,
-        )
+        pool_arrays = {
+            "states": pool.states,
+            "params": pool.params,
+            "next_states": pool.next_states,
+            "losses": pool.losses,
+            "source": pool.source,
+            "proposed_losses": pool.proposed_losses,
+            "pretrain_losses": pool.pretrain_losses,
+        }
+        for key, value in (
+            ("uncertainty", pool.uncertainty),
+            ("pretrain_uncertainty", pool.pretrain_uncertainty),
+            ("target_bins", pool.target_bins),
+        ):
+            if value is not None:
+                pool_arrays[key] = value
+        np.savez_compressed(out / f"pool_round_{round_id}.npz", **pool_arrays)
         torch.save(model.state_dict(), out / "surrogate.pt")
         torch.save(ddpm.state_dict(), out / "ddpm.pt")
         save_checkpoint(checkpoint, round_id, model, ddpm, pool, history, rng, wandb_run_id)
