@@ -6,3 +6,5 @@ __pycache__/
 .mypy_cache/
 *.egg-info/
 wandb/
+setup_leonardo_*.log
+configs/leonardo_ks_v3_base.yaml

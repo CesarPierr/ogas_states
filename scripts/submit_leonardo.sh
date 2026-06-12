@@ -56,7 +56,10 @@ cd "$ROOT"
 module purge
 module load cuda/12.1 2>/dev/null || module load cuda 2>/dev/null || true
 source "$ENV_DIR/bin/activate"
-export WANDB_MODE=online
+# Leonardo compute nodes have no outbound internet: online wandb.init() blocks
+# forever. Default to offline (stdout JSON + history.json always written);
+# sync later from the login node with: wandb sync wandb/offline-run-*
+export WANDB_MODE=\${WANDB_MODE:-offline}
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="\${SLURM_CPUS_PER_TASK:-8}"
 export XLA_PYTHON_CLIENT_PREALLOCATE=false

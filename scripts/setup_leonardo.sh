@@ -26,6 +26,18 @@ fi
 "$ENV_DIR/bin/python" -m pip install -q --upgrade pip
 "$ENV_DIR/bin/python" -m pip install -q -e .
 
+# Make the bridge find the external checkouts (default path is the Bigfoot one).
+# Must be exported BEFORE step 2: the installer's import check relies on them
+# (the pdearena editable install is a no-op finder; sys.path needs the repo roots).
+export AL4PDE_ROOT="$EXTERNAL_DIR/al4pde"
+export PDEARENA_ROOT="$EXTERNAL_DIR/pdearena"
+export JAX_CFD_ROOT="$EXTERNAL_DIR/jax-cfd"
+grep -q AL4PDE_ROOT "$ENV_DIR/bin/activate" || cat >> "$ENV_DIR/bin/activate" <<EOF
+export AL4PDE_ROOT="$EXTERNAL_DIR/al4pde"
+export PDEARENA_ROOT="$EXTERNAL_DIR/pdearena"
+export JAX_CFD_ROOT="$EXTERNAL_DIR/jax-cfd"
+EOF
+
 echo "== 2/5 external deps (al4pde/pdearena/jax-cfd + pinned torch/jax) =="
 POOLBASED_ENV="$ENV_DIR" POOLBASED_EXTERNAL="$EXTERNAL_DIR" bash scripts/install_al4pde_deps.sh
 
@@ -35,16 +47,6 @@ sed -e "s|/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_validation
     -e "s|/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_runs|$FAST/ogas_states_runs|g" \
     configs/bigfoot_ks_v3_base.yaml > configs/leonardo_ks_v3_base.yaml
 echo "wrote configs/leonardo_ks_v3_base.yaml"
-
-# Make the bridge find the external checkouts (default path is the Bigfoot one).
-export AL4PDE_ROOT="$EXTERNAL_DIR/al4pde"
-export PDEARENA_ROOT="$EXTERNAL_DIR/pdearena"
-export JAX_CFD_ROOT="$EXTERNAL_DIR/jax-cfd"
-grep -q AL4PDE_ROOT "$ENV_DIR/bin/activate" || cat >> "$ENV_DIR/bin/activate" <<EOF
-export AL4PDE_ROOT="$EXTERNAL_DIR/al4pde"
-export PDEARENA_ROOT="$EXTERNAL_DIR/pdearena"
-export JAX_CFD_ROOT="$EXTERNAL_DIR/jax-cfd"
-EOF
 
 echo "== 4/5 validation bank (KS sub5, seeded — identical to Bigfoot's) =="
 BANK="$VAL_DIR/ks_res800_al4pde_sub5_seed43_n1500_t100.npz"
