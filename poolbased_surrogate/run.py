@@ -194,6 +194,9 @@ def main(argv: list[str] | None = None) -> None:
         kernel_size=cfg.ddpm.kernel_size,
         n_quantiles=cfg.ddpm.n_quantiles if cfg.ddpm.mode == "conditional_quantile" else 0,
         quant_embed_dim=cfg.ddpm.quant_embed_dim,
+        cfg_dropout=cfg.ddpm.cfg_dropout,
+        cfg_scale=cfg.ddpm.cfg_scale,
+        cond_mode=cfg.ddpm.cond_mode,
     ).to(device)
     checkpoint = out / "checkpoint_latest.pt"
     start_round = 0
