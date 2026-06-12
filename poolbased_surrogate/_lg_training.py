@@ -10,9 +10,9 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Any
-from .train import normalize_losses, transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device
-from ._lg_generator import _balanced_sampler_from_quantiles, _scale_params, make_generator
+from .train import transform_transition_losses
+from ._lg_common import assign_loss_quantile_bins, choose_device, loss_norm_constants, normalize_losses_with
+from ._lg_generator import _balanced_sampler_from_quantiles, _scale_params, accepted_model_kwargs, make_generator
 from ._lg_scoring import score_generated_samples
 
 
@@ -98,6 +98,7 @@ def train_loss_generator(
     wandb_group: str | None = None,
     wandb_run_name: str | None = None,
     wandb_extra_config: dict[str, Any] | None = None,
+    model_kwargs: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, float]]:
     """Train a state generator conditioned on quantile labels.
 
@@ -125,15 +126,28 @@ def train_loss_generator(
         param_min = data["param_min"].astype(np.float32)
         param_max = data["param_max"].astype(np.float32)
         resolved_config = str(data["resolved_config"])
-        # Re-assign quantile bins from the full dataset so edges are consistent,
-        # unless n_quantiles is overridden/different.
-        if "quantile_edges" in data and (len(data["quantile_edges"]) - 1) == n_quantiles:
-            quantile_edges = data["quantile_edges"].astype(np.float32)
-            quantile_bins_all = data["loss_quantile_bins"].astype(np.int8)
+        # Training-time normalization constants of the difficulty signal (q05/q95 of
+        # the transformed TRAINING-pool losses). Prefer the constants persisted by
+        # the dataset builder; otherwise derive them from the full pool here. They
+        # are stored in the checkpoint so scoring renormalizes GENERATED losses on
+        # this fixed scale instead of the generated batch's own quantiles.
+        _key_lo, _key_hi = f"loss_norm_lo_{loss_metric}", f"loss_norm_hi_{loss_metric}"
+        if _key_lo in data and _key_hi in data:
+            loss_norm_lo, loss_norm_hi = float(data[_key_lo]), float(data[_key_hi])
         else:
-            quantile_bins_all, quantile_edges = assign_loss_quantile_bins(
-                normalize_losses(transform_transition_losses(raw_losses, loss_metric)), n_quantiles
-            )
+            loss_norm_lo, loss_norm_hi = loss_norm_constants(transform_transition_losses(raw_losses, loss_metric))
+        diff_norm = normalize_losses_with(transform_transition_losses(raw_losses, loss_metric), loss_norm_lo, loss_norm_hi)
+        # Re-assign quantile bins from the full dataset so edges are consistent,
+        # unless n_quantiles is overridden/different. Bin labels are reused from the
+        # dataset when available (quantile bins are invariant under the monotone
+        # transform+normalize), but the edges are always expressed on the normalized
+        # difficulty scale defined by (loss_norm_lo, loss_norm_hi) so that scoring
+        # can digitize renormalized generated losses against them directly.
+        if "quantile_edges" in data and (len(data["quantile_edges"]) - 1) == n_quantiles:
+            quantile_bins_all = data["loss_quantile_bins"].astype(np.int8)
+            _, quantile_edges = assign_loss_quantile_bins(diff_norm, n_quantiles)
+        else:
+            quantile_bins_all, quantile_edges = assign_loss_quantile_bins(diff_norm, n_quantiles)
 
     train_mask = split == 0
     # States are z-normalised: the generator trains in a unit-Gaussian-like space,
@@ -151,6 +165,10 @@ def train_loss_generator(
     sampler = _balanced_sampler_from_quantiles(quantile_train, n_quantiles)
     loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, drop_last=False)
 
+    # make_generator drops (and reports) kwargs the constructor doesn't accept;
+    # keep only the accepted subset so the checkpoint reconstructs the exact
+    # architecture even after the models grow new constructor fields.
+    model_kwargs = dict(model_kwargs or {})
     model = make_generator(
         generator=generator,
         resolution=states.shape[-1],
@@ -163,7 +181,9 @@ def train_loss_generator(
         kernel_size=kernel_size,
         n_quantiles=n_quantiles,
         quant_embed_dim=quant_embed_dim,
+        **model_kwargs,
     ).to(device)
+    model_kwargs = accepted_model_kwargs(generator, model_kwargs)
 
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
     history: list[dict[str, float]] = []
@@ -194,6 +214,7 @@ def train_loss_generator(
                 "dataset_path": str(dataset_path),
                 "eval_every": eval_every,
                 "eval_n_samples": eval_n_samples,
+                **model_kwargs,
             }
             if wandb_extra_config:
                 wandb_cfg.update(wandb_extra_config)
@@ -229,7 +250,10 @@ def train_loss_generator(
             "loss_metric": loss_metric,
             "n_quantiles": n_quantiles,
             "quant_embed_dim": quant_embed_dim,
+            "model_kwargs": model_kwargs,
             "quantile_edges": quantile_edges,
+            "loss_norm_lo": loss_norm_lo,
+            "loss_norm_hi": loss_norm_hi,
             "state_mean": state_mean,
             "state_std": state_std,
             "param_min": param_min,

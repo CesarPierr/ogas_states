@@ -75,6 +75,14 @@ def run_sweep(
         # n_quantiles and quant_embed_dim can be overridden per-config entry
         cfg_nq = int(cfg.get("n_quantiles", n_quantiles))
         cfg_qed = int(cfg.get("quant_embed_dim", 0))
+        # Any arm key not consumed above is forwarded to the generator constructor
+        # (filtered by signature in make_generator), so arms can carry HPO knobs
+        # like cfg_dropout / cfg_scale / cond_mode. An explicit "model_kwargs"
+        # dict is also honoured and takes precedence over top-level keys.
+        known_keys = {"name", "generator", "hidden", "steps", "residual_blocks", "kernel_size",
+                      "n_quantiles", "quant_embed_dim", "model_kwargs"}
+        model_kwargs = {k: v for k, v in cfg.items() if k not in known_keys}
+        model_kwargs.update(cfg.get("model_kwargs", {}) or {})
         ckpt_path, last_loss = train_loss_generator(
             dataset_path=dataset_path,
             output_dir=run_dir,
@@ -89,6 +97,7 @@ def run_sweep(
             kernel_size=cfg.get("kernel_size", 7),
             n_quantiles=cfg_nq,
             quant_embed_dim=cfg_qed,
+            model_kwargs=model_kwargs,
             seed=seed,
             device_name=device_name,
             eval_every=eval_every,

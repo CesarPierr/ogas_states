@@ -51,6 +51,24 @@ def load_resolved_config(path: Path) -> ExperimentConfig:
     return config_from_resolved_dict(json.loads(path.read_text()))
 
 
+def loss_norm_constants(losses: np.ndarray) -> tuple[float, float]:
+    """The (q05, q95) constants used by train.normalize_losses.
+
+    Persisted at dataset-build/training time so scoring can renormalize GENERATED
+    losses onto the same scale that defined the quantile edges, instead of
+    renormalizing by the generated batch's own quantiles (which breaks calibration
+    whenever the generated loss distribution differs from the training one).
+    """
+    losses = np.asarray(losses, dtype=np.float32).reshape(-1)
+    return float(np.quantile(losses, 0.05)), float(np.quantile(losses, 0.95))
+
+
+def normalize_losses_with(losses: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """train.normalize_losses with externally supplied (training-time) constants."""
+    losses = np.asarray(losses, dtype=np.float32)
+    return ((losses - lo) / (hi - lo + 1e-8)).clip(0.0, 1.5).astype(np.float32)
+
+
 def assign_loss_quantile_bins(losses: np.ndarray, n_bins: int = 10) -> tuple[np.ndarray, np.ndarray]:
     """Return (bin_labels, bin_edges) where labels ∈ {0, …, n_bins-1}."""
     losses = np.asarray(losses, dtype=np.float32).reshape(-1)
