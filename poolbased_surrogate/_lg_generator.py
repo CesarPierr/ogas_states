@@ -1,6 +1,7 @@
 """Generator construction, param scaling, and sampling for the lab."""
 from __future__ import annotations
 
+import inspect
 import json
 import numpy as np
 import torch
@@ -19,6 +20,23 @@ def _unscale_params(params: np.ndarray, param_min: np.ndarray, param_max: np.nda
     return (0.5 * (params + 1.0) * (param_max - param_min) + param_min).astype(np.float32)
 
 
+def _generator_class(generator: str):
+    return FlowMatching1D if generator.lower() in ("flow", "flow_matching", "fm") else DDPM1D
+
+
+def accepted_model_kwargs(generator: str, model_kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Subset of model_kwargs the generator constructor actually accepts.
+
+    Used so sweep arms / CLIs can carry knobs for newer model branches (e.g.
+    cfg_dropout, cfg_scale, cond_mode) without breaking older constructors, and
+    so checkpoints only persist kwargs that shaped the trained architecture.
+    """
+    sig_params = inspect.signature(_generator_class(generator).__init__).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig_params.values()):
+        return dict(model_kwargs)
+    return {k: v for k, v in model_kwargs.items() if k in sig_params}
+
+
 def make_generator(
     generator: str,
     resolution: int,
@@ -31,8 +49,16 @@ def make_generator(
     kernel_size: int,
     n_quantiles: int = 0,
     quant_embed_dim: int = 0,
+    **model_kwargs: Any,
 ):
-    cls = FlowMatching1D if generator.lower() in ("flow", "flow_matching", "fm") else DDPM1D
+    """Build a generator; extra **model_kwargs are forwarded to the constructor
+    only when it accepts them (see accepted_model_kwargs)."""
+    cls = _generator_class(generator)
+    accepted = accepted_model_kwargs(generator, model_kwargs)
+    dropped = sorted(k for k in model_kwargs if k not in accepted)
+    if dropped:
+        print(f"  [make_generator] {cls.__name__} does not accept {dropped}; ignoring.", flush=True)
+    model_kwargs = accepted
     return cls(
         resolution=resolution,
         hidden=hidden,
@@ -44,6 +70,7 @@ def make_generator(
         kernel_size=kernel_size,
         n_quantiles=n_quantiles,
         quant_embed_dim=quant_embed_dim,
+        **model_kwargs,
     )
 
 
@@ -111,6 +138,7 @@ def sample_loss_generator(
         kernel_size=int(checkpoint["kernel_size"]),
         n_quantiles=n_quantiles,
         quant_embed_dim=quant_embed_dim,
+        **dict(checkpoint.get("model_kwargs") or {}),
     ).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()

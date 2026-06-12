@@ -10,7 +10,7 @@ from .data import TransitionPool
 from .models.surrogate import build_surrogate
 from .pde import PDE1D
 from .train import compute_transition_losses, normalize_losses, transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device, load_resolved_config, stratified_split
+from ._lg_common import assign_loss_quantile_bins, choose_device, load_resolved_config, loss_norm_constants, stratified_split
 
 
 def _validation_state_stats(validation_path: Path | None, fallback_arrays: list[np.ndarray]) -> tuple[float, float]:
@@ -109,6 +109,10 @@ def build_loss_dataset_from_run(
     split = stratified_split(losses, seed=split_seed, val_fraction=val_fraction, test_fraction=test_fraction)
     loss_norm = normalize_losses(losses)
     loss_norm_rmse = normalize_losses(transform_transition_losses(losses, "rmse"))
+    # Training-pool normalization constants (q05/q95 per loss metric), persisted so
+    # scoring can renormalize generated losses on the TRAINING scale (see _lg_scoring).
+    loss_norm_lo_mse, loss_norm_hi_mse = loss_norm_constants(losses)
+    loss_norm_lo_rmse, loss_norm_hi_rmse = loss_norm_constants(transform_transition_losses(losses, "rmse"))
     loss_quantile_bins, quantile_edges = assign_loss_quantile_bins(losses, n_quantile_bins)
 
     if output_path is None:
@@ -133,6 +137,10 @@ def build_loss_dataset_from_run(
         "loss_p90": float(np.quantile(losses, 0.9)),
         "loss_p95": float(np.quantile(losses, 0.95)),
         "loss_p99": float(np.quantile(losses, 0.99)),
+        "loss_norm_lo_mse": loss_norm_lo_mse,
+        "loss_norm_hi_mse": loss_norm_hi_mse,
+        "loss_norm_lo_rmse": loss_norm_lo_rmse,
+        "loss_norm_hi_rmse": loss_norm_hi_rmse,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     np.savez_compressed(
@@ -145,6 +153,10 @@ def build_loss_dataset_from_run(
         loss_norm_rmse=loss_norm_rmse,
         loss_quantile_bins=loss_quantile_bins,
         quantile_edges=quantile_edges,
+        loss_norm_lo_mse=np.array(loss_norm_lo_mse, dtype=np.float32),
+        loss_norm_hi_mse=np.array(loss_norm_hi_mse, dtype=np.float32),
+        loss_norm_lo_rmse=np.array(loss_norm_lo_rmse, dtype=np.float32),
+        loss_norm_hi_rmse=np.array(loss_norm_hi_rmse, dtype=np.float32),
         pretrain_losses=pretrain_losses,
         source=source,
         split=split,

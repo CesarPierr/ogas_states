@@ -13,7 +13,7 @@ from .generator_metrics import amplitude_distribution_metrics, conditioning_fide
 from .models.surrogate import build_surrogate
 from .pde import PDE1D
 from .train import compute_transition_losses, normalize_losses, transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device, config_from_resolved_dict
+from ._lg_common import assign_loss_quantile_bins, choose_device, config_from_resolved_dict, normalize_losses_with
 from ._lg_generator import _sampling_strategies, sample_loss_generator
 
 
@@ -82,6 +82,11 @@ def score_generated_samples(
         resolved_config = json.loads(str(data["resolved_config"]))
         metadata = json.loads(str(data["metadata"]))
         quantile_edges = data["quantile_edges"].astype(np.float32) if "quantile_edges" in data else None
+        dataset_norm_consts = {
+            m: (float(data[f"loss_norm_lo_{m}"]), float(data[f"loss_norm_hi_{m}"]))
+            for m in ("mse", "rmse")
+            if f"loss_norm_lo_{m}" in data and f"loss_norm_hi_{m}" in data
+        }
 
     device = choose_device(device_name)
     if jax_platform != "auto":
@@ -100,12 +105,52 @@ def score_generated_samples(
     loss_metric = str(ckpt_meta.get("loss_metric", "rmse"))
     n_params_model = int(ckpt_meta.get("n_params", 0))
 
-    if "quantile_edges" in ckpt_meta:
-        quantile_edges = np.asarray(ckpt_meta["quantile_edges"], dtype=np.float32)
-    if quantile_edges is None:
+    # --- difficulty normalization constants + quantile edges (must share one scale) ---
+    # realized_norm below is digitized against quantile_edges, so the generated losses
+    # must be normalized with the TRAINING-time constants that defined those edges —
+    # never with the generated batch's own quantiles (that silently re-centres the
+    # bins onto whatever distribution the generator produced).
+    legacy_norm_fallback = False
+    if "loss_norm_lo" in ckpt_meta and "loss_norm_hi" in ckpt_meta:
+        # New checkpoints persist constants + edges together on the same scale.
+        loss_norm_lo, loss_norm_hi = float(ckpt_meta["loss_norm_lo"]), float(ckpt_meta["loss_norm_hi"])
+        if "quantile_edges" in ckpt_meta:
+            quantile_edges = np.asarray(ckpt_meta["quantile_edges"], dtype=np.float32)
+        else:
+            _, quantile_edges = assign_loss_quantile_bins(
+                normalize_losses_with(transform_transition_losses(raw_losses, loss_metric), loss_norm_lo, loss_norm_hi),
+                n_quantiles,
+            )
+    elif loss_metric in dataset_norm_consts:
+        # Old checkpoint + new dataset: use the dataset-builder constants and rebuild
+        # the edges on that scale (old checkpoint edges may live on the raw-loss scale).
+        loss_norm_lo, loss_norm_hi = dataset_norm_consts[loss_metric]
+        print("  Note: checkpoint lacks loss_norm_lo/hi; using dataset constants and re-deriving quantile edges on the training scale.", flush=True)
         _, quantile_edges = assign_loss_quantile_bins(
-            normalize_losses(transform_transition_losses(raw_losses, loss_metric)), n_quantiles
+            normalize_losses_with(transform_transition_losses(raw_losses, loss_metric), loss_norm_lo, loss_norm_hi),
+            n_quantiles,
         )
+    else:
+        # Legacy artifacts: keep the old behaviour (renormalize generated losses by
+        # their own batch quantiles) so old runs still score, but warn loudly.
+        legacy_norm_fallback = True
+        loss_norm_lo = loss_norm_hi = None
+        print(
+            "  WARNING: neither checkpoint nor dataset carries the training-time loss "
+            "normalization constants (loss_norm_lo/hi); falling back to per-batch "
+            "renormalization of GENERATED losses. calibration_mae / "
+            "calibration_monotone_frac / conditioning_mi_nats / "
+            "target_vs_realized_rank_corr are NOT scale-invariant in this mode — "
+            "rebuild the dataset with scripts/build_loss_generator_dataset.py and "
+            "retrain to fix.",
+            flush=True,
+        )
+        if "quantile_edges" in ckpt_meta:
+            quantile_edges = np.asarray(ckpt_meta["quantile_edges"], dtype=np.float32)
+        if quantile_edges is None:
+            _, quantile_edges = assign_loss_quantile_bins(
+                normalize_losses(transform_transition_losses(raw_losses, loss_metric)), n_quantiles
+            )
 
     surrogate_path = Path(metadata["surrogate_path"])
     surrogate = build_surrogate(
@@ -197,8 +242,15 @@ def score_generated_samples(
             f"{strategy_name}/loss_vs_reference_ratio": gen_loss_mean / (ref_loss_mean + 1e-12),
         })
 
-        # 3. Conditioning fidelity
-        realized_norm = normalize_losses(transform_transition_losses(gen_losses[finite], loss_metric))
+        # 3. Conditioning fidelity — normalize generated losses with the TRAINING-time
+        # constants so realized-bin assignment is invariant to shifts/scales of the
+        # generated loss distribution (legacy fallback: per-batch quantiles, warned above).
+        if legacy_norm_fallback:
+            realized_norm = normalize_losses(transform_transition_losses(gen_losses[finite], loss_metric))
+        else:
+            realized_norm = normalize_losses_with(
+                transform_transition_losses(gen_losses[finite], loss_metric), loss_norm_lo, loss_norm_hi
+            )
         realized_quantiles = np.digitize(realized_norm, quantile_edges[1:], right=False).clip(0, n_quantiles - 1)
         target_q_finite = target_quantiles[finite]
 

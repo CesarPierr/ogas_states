@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import argparse
 
-from ._lg_common import _dataclass_from_dict, assign_loss_quantile_bins, choose_device, config_from_resolved_dict, load_resolved_config, stratified_split
+from ._lg_common import _dataclass_from_dict, assign_loss_quantile_bins, choose_device, config_from_resolved_dict, load_resolved_config, loss_norm_constants, normalize_losses_with, stratified_split
 from ._lg_dataset import _recompute_losses_with_surrogate, _validation_state_stats, build_loss_dataset_from_run
-from ._lg_generator import _balanced_sampler_from_quantiles, _sampling_strategies, _scale_params, _softmax, _unscale_params, make_generator, sample_loss_generator
+from ._lg_generator import _balanced_sampler_from_quantiles, _sampling_strategies, _scale_params, _softmax, _unscale_params, accepted_model_kwargs, make_generator, sample_loss_generator
 from ._lg_scoring import _load_validation_ref_states, _pde_step_batch, score_generated_samples
 from ._lg_sweep import SWEEP_CONFIGS, _print_sweep_table, run_sweep
 from ._lg_training import _summarize_eval_for_history, train_loss_generator
@@ -28,13 +28,16 @@ __all__ = [
     '_summarize_eval_for_history',
     '_unscale_params',
     '_validation_state_stats',
+    'accepted_model_kwargs',
     'assign_loss_quantile_bins',
     'build_dataset_cli',
     'build_loss_dataset_from_run',
     'choose_device',
     'config_from_resolved_dict',
     'load_resolved_config',
+    'loss_norm_constants',
     'make_generator',
+    'normalize_losses_with',
     'run_sweep',
     'sample_loss_generator',
     'score_generated_samples',
@@ -91,6 +94,14 @@ def train_cli(argv: list[str] | None = None) -> None:
     parser.add_argument("--loss-metric", choices=["mse", "rmse"], default="rmse")
     parser.add_argument("--n-quantiles", type=int, default=10)
     parser.add_argument("--quant-embed-dim", type=int, default=0)
+    # Conditioning-HPO knobs, forwarded to the generator constructor only when set
+    # (so current models keep working until the extended DDPMConfig branch merges).
+    parser.add_argument("--cfg-dropout", type=float, default=None,
+                        help="Classifier-free-guidance conditioning dropout (only forwarded when set)")
+    parser.add_argument("--cfg-scale", type=float, default=None,
+                        help="Classifier-free-guidance scale at sampling (only forwarded when set)")
+    parser.add_argument("--cond-mode", choices=["concat", "film"], default=None,
+                        help="Conditioning injection mode (only forwarded when set)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--jax-platform", choices=["auto", "cpu", "cuda"], default="auto")
@@ -103,6 +114,11 @@ def train_cli(argv: list[str] | None = None) -> None:
     parser.add_argument("--wandb-group", default=None)
     parser.add_argument("--wandb-run-name", default=None)
     args = parser.parse_args(argv)
+    model_kwargs = {
+        k: v
+        for k, v in {"cfg_dropout": args.cfg_dropout, "cfg_scale": args.cfg_scale, "cond_mode": args.cond_mode}.items()
+        if v is not None
+    }
     ckpt, _ = train_loss_generator(
         dataset_path=args.dataset,
         output_dir=args.output_dir,
@@ -118,6 +134,7 @@ def train_cli(argv: list[str] | None = None) -> None:
         loss_metric=args.loss_metric,
         n_quantiles=args.n_quantiles,
         quant_embed_dim=args.quant_embed_dim,
+        model_kwargs=model_kwargs,
         seed=args.seed,
         device_name=args.device,
         eval_every=args.eval_every,
