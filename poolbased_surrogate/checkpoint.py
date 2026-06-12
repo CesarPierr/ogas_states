@@ -82,5 +82,7 @@ def load_checkpoint(path: Path, model, ddpm, rng: np.random.Generator, device: t
     rng.bit_generator.state = payload["numpy_rng_state"]
     torch.set_rng_state(payload["torch_rng_state"].cpu())
     if torch.cuda.is_available() and "torch_cuda_rng_state" in payload:
-        torch.cuda.set_rng_state_all(payload["torch_cuda_rng_state"])
+        # map_location=device may have moved the saved ByteTensors to CUDA;
+        # set_rng_state_all requires CPU ByteTensors.
+        torch.cuda.set_rng_state_all([s.cpu() for s in payload["torch_cuda_rng_state"]])
     return int(payload["next_round"]), pool, list(payload["history"]), str(payload["wandb_run_id"])
