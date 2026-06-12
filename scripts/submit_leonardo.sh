@@ -9,7 +9,7 @@
 #   LEONARDO_WALLTIME  walltime HH:MM:SS        (default 08:00:00; boost normal cap is 24h)
 #   LEONARDO_JOB_NAME  job name                 (default poolbased-leo)
 #   LEONARDO_RUN_DIR   output dir for logs      (default $FAST/ogas_states_runs/adhoc)
-#   POOLBASED_ENV      venv dir                 (default $FAST/ogas_states/.venv)
+#   POOLBASED_ENV      venv dir                 (default <repo>/.venv, wherever the repo lives)
 #   LEONARDO_PRECREATE_VALIDATION  1|0          (default 1; runs --create-validation-only on login node first)
 set -euo pipefail
 
@@ -23,7 +23,7 @@ for _arg in "${RUN_ARGS[@]+"${RUN_ARGS[@]}"}"; do
   RUN_ARGS_QUOTED="$RUN_ARGS_QUOTED $(printf '%q' "$_arg")"
 done
 
-ENV_DIR=${POOLBASED_ENV:-$FAST/ogas_states/.venv}
+ENV_DIR=${POOLBASED_ENV:-$ROOT/.venv}
 ACCOUNT=${LEONARDO_ACCOUNT:-euhpc_d36_033}
 QOS=${LEONARDO_QOS:-normal}
 PARTITION=${LEONARDO_PARTITION:-boost_usr_prod}
