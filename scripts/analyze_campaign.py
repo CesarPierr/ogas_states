@@ -18,7 +18,7 @@ import numpy as np
 from scipy.stats import mannwhitneyu, ttest_ind
 
 ARMS = ["uniform_baseline", "noise_inject", "random_tube", "mined_ic",
-        "gen_v3", "gen_v3_edit", "gen_v3_cfg", "gen_v3_cfg2"]
+        "gen_v3", "gen_v3_edit", "gen_v3_guard", "gen_v3_cfg", "gen_v3_cfg2"]
 SEEDS = [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]
 SETS = ["val_hard_tv_div", "val_hard_lowamp_div", "val_hard_mixed_div",
         "val_tube_lowk_rho0p1", "val_tube_lowk_rho0p25", "val_tube_lowk_rho0p5",
