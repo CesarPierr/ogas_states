@@ -377,18 +377,52 @@ def pool_difficulty(raw_losses: np.ndarray, next_states: np.ndarray, metric: str
     return transform_transition_losses(raw_losses, metric)
 
 
+_PHYSICAL_SIGNALS = ("tv", "spec_centroid")
+
+
+def physical_difficulty(field: np.ndarray, kind: str) -> np.ndarray:
+    """Surrogate-INDEPENDENT difficulty proxy computed from the state field itself.
+
+    Unlike 'loss'/'ensemble_var' (which move as the surrogate learns, so the
+    conditioning target is non-stationary and the generator chases last round's
+    labels), a physical proxy is STATIONARY — the generator can reliably learn to
+    steer it. It does not perfectly predict surrogate error (that is surrogate- and
+    pool-dependent), but it gives controllable coverage of the physically-hard
+    (high-wavenumber / rough) regime the validation tube sets are defined by.
+      tv            = total variation (L1 of spatial gradient) — spatial roughness
+      spec_centroid = energy-weighted mean wavenumber — where the energy sits in k
+    (A top-quartile high-k energy fraction was tried and dropped: KS energy lives at
+    low wavenumbers, so a fixed top-of-band threshold is empty/fragile here.)
+    """
+    arr = np.asarray(field, dtype=np.float32)
+    x = arr.reshape(arr.shape[0], -1)
+    kind = str(kind).lower()
+    if kind == "tv":
+        return np.abs(np.diff(x, axis=-1)).sum(-1).astype(np.float32)
+    if kind == "spec_centroid":
+        spec = np.abs(np.fft.rfft(x, axis=-1)) ** 2
+        etot = spec.sum(-1) + 1e-12
+        ks = np.arange(spec.shape[-1], dtype=np.float32)
+        return ((spec * ks).sum(-1) / etot).astype(np.float32)
+    raise ValueError(f"unknown physical difficulty kind {kind!r}; choices {_PHYSICAL_SIGNALS}")
+
+
 def pool_difficulty_signal(
     pool: TransitionPool, loss_metric: str, difficulty_signal: str, from_pretrain: bool = False
 ) -> np.ndarray:
     """Raw per-transition difficulty used to bin the pool for quantile conditioning.
 
-    difficulty_signal='ensemble_var' uses the ensemble disagreement (reducible/epistemic
-    uncertainty); 'loss' uses the surrogate one-step error under loss_metric. Falls back to
-    the loss signal if uncertainty is unavailable (e.g. ensemble_size == 1).
+    difficulty_signal in {'highk','tv','spec_centroid'} uses a surrogate-independent
+    PHYSICAL proxy of the transition target (stationary conditioning target);
+    'ensemble_var' uses the ensemble disagreement (reducible/epistemic uncertainty);
+    'loss' uses the surrogate one-step error under loss_metric. Falls back to the loss
+    signal if uncertainty is unavailable (e.g. ensemble_size == 1).
 
     from_pretrain=True prefers the signals computed BEFORE the surrogate trained on this
     pool (honest, out-of-sample difficulty); falls back to post-train signals if absent.
     """
+    if str(difficulty_signal or "loss").lower() in _PHYSICAL_SIGNALS:
+        return physical_difficulty(pool.next_states, difficulty_signal)
     if str(difficulty_signal or "loss").lower() == "ensemble_var":
         if from_pretrain and pool.pretrain_uncertainty is not None:
             return np.asarray(pool.pretrain_uncertainty, dtype=np.float32)
@@ -410,6 +444,8 @@ def realized_difficulty(
 ) -> np.ndarray:
     """Difficulty of generated states for realized-bin assignment in generator_eval,
     using the same signal as training so realized bins align with the stored edges."""
+    if str(difficulty_signal or "loss").lower() in _PHYSICAL_SIGNALS:
+        return physical_difficulty(next_states, difficulty_signal)
     if str(difficulty_signal or "loss").lower() == "ensemble_var" and gen_uncertainty is not None:
         return np.asarray(gen_uncertainty, dtype=np.float32)
     return pool_difficulty(gen_losses, next_states, loss_metric)
