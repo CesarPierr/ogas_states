@@ -416,6 +416,11 @@ def make_strategy_transitions(
     """Generator-free baselines for the non-uniform half (1 solver step per kept state).
 
     random_tube: anchors + random low-k perturbations (no learning, no selection).
+    tube_select: anchors + random low-k perturbations, candidate_factor x oversample,
+                 keep the top-n by ensemble disagreement. The selection ablation:
+                 random_tube's candidate SOURCE with mined_ic's SELECTION, so
+                 (vs random_tube) it isolates the value of disagreement selection and
+                 (vs gen_v3_edit) the value of LEARNED generation over anchor-perturb.
     mined_ic:    candidate_factor x random ICs, keep the top-n by ensemble
                  disagreement (selection without generation).
     """
@@ -424,6 +429,17 @@ def make_strategy_transitions(
         states = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
         params = pde.sample_params_uniform(n, rng)
         return states, params
+    if strategy == "tube_select":
+        want = n * max(2, int(candidate_factor))
+        anchor_idx = rng.choice(len(anchors), size=want, replace=len(anchors) < want)
+        cand_states = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
+        cand_params = pde.sample_params_uniform(want, rng)
+        if surrogate is not None:
+            dis = ensemble_disagreement(surrogate, cand_states, cand_params, device)
+            keep = np.argsort(-dis)[:n]
+        else:
+            keep = np.arange(n)
+        return cand_states[keep].astype(np.float32), cand_params[keep].astype(np.float32)
     if strategy == "mined_ic":
         want = n * max(2, int(candidate_factor))
         cand_states = pde.sample_ic_uniform(want, rng)
@@ -488,7 +504,7 @@ def make_mixed_pool(
 
     # Generator-free baseline strategies fill the non-uniform half with single-step
     # transitions at exactly one solver step per kept state (budget-matched).
-    if n_generated_traj > 0 and strategy in ("random_tube", "mined_ic"):
+    if n_generated_traj > 0 and strategy in ("random_tube", "tube_select", "mined_ic"):
         n_generated = n_generated_traj * steps
         states0, params = make_strategy_transitions(
             strategy, pde, surrogate, anchors, n_generated, rng, device, solver_batch_size,
