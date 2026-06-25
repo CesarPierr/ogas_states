@@ -1,11 +1,13 @@
-"""5-seed campaign analysis: mean±std per arm + Welch t / Mann-Whitney U vs baselines.
+"""Analyse de campagne multi-seed : moyenne±std par bras + Welch t / Mann-Whitney U vs baselines.
 
-For every arm with >=2 finished seeds under BASE_DIR (<arm>_seed<seed>/history.json,
-last entry must be the final round), aggregates the final-round metrics across seeds
-and tests each arm against uniform_baseline AND random_tube. At n=5 only large
-effects survive — report exact p-values, no stars.
+Pour chaque bras ayant >=2 seeds complets (<arm>_seed<seed>/history.json, dernier round),
+agrège les métriques du dernier round sur les seeds et teste chaque bras contre une ou
+plusieurs références. p-values exactes, pas d'étoiles (à n=10 seuls les gros effets survivent).
 
-  python scripts/analyze_campaign.py [--base-dir DIR] [--metric nrmse_p50] [--out FILE]
+  python scripts/analyze_campaign.py [--metric nrmse_p50]
+      [--arms gen_phys_tv_edit,gen_v3_edit]   # filtre les bras (défaut: tous) — utile pour lire
+      [--vs uniform_baseline]                 # références (défaut: uniform_baseline,random_tube)
+      [--base-dir DIR] [--out FILE]
 """
 from __future__ import annotations
 
@@ -54,10 +56,15 @@ def main() -> None:
                     default=Path(os.environ.get("FAST", ".")) / "ogas_states_runs/ks800_v3_pilot")
     ap.add_argument("--metric", default="nrmse_p50")
     ap.add_argument("--n-rounds", type=int, default=10)
+    ap.add_argument("--arms", default=None, help="bras à montrer, séparés par virgule (défaut: tous)")
+    ap.add_argument("--vs", default="uniform_baseline,random_tube", help="références, séparées par virgule")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
-    data = {a: collect(args.base_dir, a, args.n_rounds) for a in ARMS}
+    # filtre optionnel des bras (les références sont toujours incluses pour pouvoir comparer)
+    refs = args.vs.split(",")
+    arms = (args.arms.split(",") + refs) if args.arms else ARMS
+    data = {a: collect(args.base_dir, a, args.n_rounds) for a in dict.fromkeys(arms)}
     data = {a: d for a, d in data.items() if d}
     ns = {a: max(len(v) for v in d.values()) for a, d in data.items()}
     print(f"arms found (n seeds): { {a: ns[a] for a in data} }\n")
@@ -65,7 +72,7 @@ def main() -> None:
     metrics = [f"hard_val/{s}/{args.metric}" for s in SETS] + BULK
     report: dict = {"n_seeds": ns, "metric": args.metric, "rows": []}
 
-    for ref_name in ["uniform_baseline", "random_tube"]:
+    for ref_name in refs:
         if ref_name not in data:
             continue
         print(f"===== arm vs {ref_name} (mean±std, % change, Welch p, MWU p) =====")
@@ -87,7 +94,7 @@ def main() -> None:
                                        "ref_mean": float(ref.mean()), "ref_std": float(ref.std(ddof=1)),
                                        "pct_change": float(chg), "welch_p": float(tw.pvalue),
                                        "mwu_p": float(mw.pvalue)})
-                line += f" | {a[:11]}: {chg:>+7.1f}% (w={tw.pvalue:.3f},u={mw.pvalue:.3f})"
+                line += f" | {a[:16]}: {chg:>+7.1f}% (w={tw.pvalue:.3f},u={mw.pvalue:.3f})"
             print(line)
         print()
 

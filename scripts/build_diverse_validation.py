@@ -80,9 +80,16 @@ def band_perturbation(n: int, L: int, k1: int, k2: int, rng: np.random.Generator
 
 
 def param_cells(params: np.ndarray, edges0: np.ndarray, edges1: np.ndarray, grid: int) -> np.ndarray:
-    """Flat 4x4 (grid x grid) quantile-cell id per row of params, from (param0, param1)."""
+    """Flat grid x grid quantile-cell id per row of params, from (param0, param1).
+
+    Single-parameter PDEs (e.g. 1D Burgers, params.shape[1] == 1) have no second
+    parameter axis: edges1 is then a degenerate constant grid and every row maps to
+    column 0 of the second axis, so stratification is purely over param0."""
     c0 = np.clip(np.digitize(params[:, 0], edges0[1:-1]), 0, grid - 1)
-    c1 = np.clip(np.digitize(params[:, 1], edges1[1:-1]), 0, grid - 1)
+    if params.shape[1] < 2:
+        c1 = np.zeros(len(params), dtype=np.int64)
+    else:
+        c1 = np.clip(np.digitize(params[:, 1], edges1[1:-1]), 0, grid - 1)
     return c0 * grid + c1
 
 
@@ -221,7 +228,10 @@ def main(argv=None) -> None:
     # 4x4 quantile grid over (param0, param1) of the bank
     grid = args.grid
     edges0 = np.quantile(params[:, 0], np.linspace(0, 1, grid + 1))
-    edges1 = np.quantile(params[:, 1], np.linspace(0, 1, grid + 1))
+    if params.shape[1] >= 2:
+        edges1 = np.quantile(params[:, 1], np.linspace(0, 1, grid + 1))
+    else:  # single-param PDE (e.g. Burgers): degenerate second axis, one column
+        edges1 = np.zeros(grid + 1)
     traj_cell = param_cells(params, edges0, edges1, grid)
 
     # ---- per-transition difficulty, skipping t=0 (transitions u_t -> u_{t+1}, t=1..T-1) ----
