@@ -277,6 +277,8 @@ def main(argv: list[str] | None = None) -> None:
                 model, pool, cfg.surrogate.batch_size, device
             )
         finish_phase("pretrain_losses", phase_start)
+        # Garde-fou anti-collapse : on sauvegarde les poids AVANT l'entraînement du round.
+        # Si le bulk val explose après (cf plus bas), on restaure ces poids. 0 = désactivé.
         pre_train_state = None
         if cfg.surrogate.degradation_guard > 0:
             pre_train_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -366,6 +368,8 @@ def main(argv: list[str] | None = None) -> None:
             device=device,
         )
         finish_phase("full_validation", phase_start)
+        # Garde-fou (suite) : si le bulk val a régressé de plus de `degradation_guard` x le
+        # round précédent, on annule le round (restaure les poids d'avant) et on ré-évalue.
         guard_metrics: dict[str, float] = {}
         if pre_train_state is not None:
             guard_metrics["surrogate/guard_reverted"] = 0.0

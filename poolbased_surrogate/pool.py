@@ -399,6 +399,17 @@ def _anchor_states(pools: list, previous: TransitionPool | None, rng: np.random.
 
 
 @torch.no_grad()
+def _keep_hardest(states, params, surrogate, n, device):
+    """Garde les n candidats les plus durs = ceux sur lesquels l'ensemble du surrogate
+    est le plus en désaccord. Sans surrogate (round 0), garde simplement les n premiers."""
+    if surrogate is not None:
+        dis = ensemble_disagreement(surrogate, states, params, device)
+        idx = np.argsort(-dis)[:n]
+    else:
+        idx = np.arange(n)
+    return states[idx].astype(np.float32), params[idx].astype(np.float32)
+
+
 def make_strategy_transitions(
     strategy: str,
     pde: PDE1D,
@@ -413,44 +424,27 @@ def make_strategy_transitions(
     tube_kmax: int,
     candidate_factor: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Generator-free baselines for the non-uniform half (1 solver step per kept state).
+    """Baselines SANS générateur pour la moitié non-uniforme (1 pas de solveur par état gardé).
 
-    random_tube: anchors + random low-k perturbations (no learning, no selection).
-    tube_select: anchors + random low-k perturbations, candidate_factor x oversample,
-                 keep the top-n by ensemble disagreement. The selection ablation:
-                 random_tube's candidate SOURCE with mined_ic's SELECTION, so
-                 (vs random_tube) it isolates the value of disagreement selection and
-                 (vs gen_v3_edit) the value of LEARNED generation over anchor-perturb.
-    mined_ic:    candidate_factor x random ICs, keep the top-n by ensemble
-                 disagreement (selection without generation).
+    random_tube : ancres + perturbations basse-fréquence aléatoires (ni apprentissage, ni sélection).
+    tube_select : random_tube (SOURCE) + mined_ic (SÉLECTION) — oversample x candidate_factor puis
+                  garde les plus durs. Ablation qui isole la valeur de la sélection (vs random_tube)
+                  et celle de la génération apprise (vs gen_v3_edit).
+    mined_ic    : candidate_factor x IC aléatoires, garde les plus durs (sélection sans génération).
     """
     if strategy == "random_tube":
         anchor_idx = rng.choice(len(anchors), size=n, replace=len(anchors) < n)
         states = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
-        params = pde.sample_params_uniform(n, rng)
-        return states, params
+        return states, pde.sample_params_uniform(n, rng)
+    want = n * max(2, int(candidate_factor))  # on sur-échantillonne puis on garde les n plus durs
     if strategy == "tube_select":
-        want = n * max(2, int(candidate_factor))
         anchor_idx = rng.choice(len(anchors), size=want, replace=len(anchors) < want)
-        cand_states = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
-        cand_params = pde.sample_params_uniform(want, rng)
-        if surrogate is not None:
-            dis = ensemble_disagreement(surrogate, cand_states, cand_params, device)
-            keep = np.argsort(-dis)[:n]
-        else:
-            keep = np.arange(n)
-        return cand_states[keep].astype(np.float32), cand_params[keep].astype(np.float32)
+        cand = _tube_perturbation(anchors[anchor_idx], rng, tube_rho_min, tube_rho_max, tube_kmax)
+        return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
     if strategy == "mined_ic":
-        want = n * max(2, int(candidate_factor))
-        cand_states = pde.sample_ic_uniform(want, rng)
-        cand_params = pde.sample_params_uniform(want, rng)
-        if surrogate is not None:
-            dis = ensemble_disagreement(surrogate, cand_states, cand_params, device)
-            keep = np.argsort(-dis)[:n]
-        else:
-            keep = np.arange(n)
-        return cand_states[keep].astype(np.float32), cand_params[keep].astype(np.float32)
-    raise ValueError(f"Unknown pool.strategy {strategy!r}")
+        cand = pde.sample_ic_uniform(want, rng)
+        return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
+    raise ValueError(f"pool.strategy inconnue : {strategy!r}")
 
 
 @torch.no_grad()
