@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from poolbased_surrogate.loss_generator_lab import build_dataset_cli
+from poolbased_surrogate.lab import build_dataset_cli
 
 
 if __name__ == "__main__":

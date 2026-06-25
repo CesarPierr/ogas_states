@@ -10,10 +10,10 @@ import torch
 from pathlib import Path
 from torch.utils.data import DataLoader, TensorDataset
 from typing import Any
-from .train import transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device, loss_norm_constants, normalize_losses_with
-from ._lg_generator import _balanced_sampler_from_quantiles, _scale_params, accepted_model_kwargs, make_generator
-from ._lg_scoring import score_generated_samples
+from ..train import transform_transition_losses
+from .common import assign_loss_quantile_bins, choose_device, loss_norm_constants, normalize_losses_with
+from .generator import _balanced_sampler_from_quantiles, _scale_params, accepted_model_kwargs, make_generator
+from .scoring import score_generated_samples
 
 
 def _summarize_eval_for_history(score: dict[str, float], epoch: int, eval_time_s: float) -> dict[str, float]:

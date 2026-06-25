@@ -1,18 +1,18 @@
 """Loss-generator lab: standalone offline tool to build a (state, difficulty) dataset
 from a finished run, train/sweep loss-conditioned generators, and score them against
 real-KS statistics. NOT used by the live training loop (run.py). Implementation lives
-in the _lg_* modules; this file keeps the CLIs and the public API for scripts/notebooks.
+split across the sub-package modules; this file keeps the CLIs and public API.
 """
 from __future__ import annotations
 
 import argparse
 
-from ._lg_common import _dataclass_from_dict, assign_loss_quantile_bins, choose_device, config_from_resolved_dict, load_resolved_config, loss_norm_constants, normalize_losses_with, stratified_split
-from ._lg_dataset import _recompute_losses_with_surrogate, _validation_state_stats, build_loss_dataset_from_run
-from ._lg_generator import _balanced_sampler_from_quantiles, _sampling_strategies, _scale_params, _softmax, _unscale_params, accepted_model_kwargs, make_generator, sample_loss_generator
-from ._lg_scoring import _load_validation_ref_states, _pde_step_batch, score_generated_samples
-from ._lg_sweep import SWEEP_CONFIGS, _print_sweep_table, run_sweep
-from ._lg_training import _summarize_eval_for_history, train_loss_generator
+from .common import _dataclass_from_dict, assign_loss_quantile_bins, choose_device, config_from_resolved_dict, load_resolved_config, loss_norm_constants, normalize_losses_with, stratified_split
+from .dataset import _recompute_losses_with_surrogate, _validation_state_stats, build_loss_dataset_from_run
+from .generator import _balanced_sampler_from_quantiles, _sampling_strategies, _scale_params, _softmax, _unscale_params, accepted_model_kwargs, make_generator, sample_loss_generator
+from .scoring import _load_validation_ref_states, _pde_step_batch, score_generated_samples
+from .sweep import SWEEP_CONFIGS, _print_sweep_table, run_sweep
+from .training import _summarize_eval_for_history, train_loss_generator
 
 __all__ = [
     'SWEEP_CONFIGS',

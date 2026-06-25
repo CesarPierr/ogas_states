@@ -8,8 +8,8 @@ import torch
 from pathlib import Path
 from torch.utils.data import WeightedRandomSampler
 from typing import Any
-from .models.ddpm import DDPM1D, FlowMatching1D
-from ._lg_common import choose_device
+from ..models.ddpm import DDPM1D, FlowMatching1D
+from .common import choose_device
 
 
 def _scale_params(params: np.ndarray, param_min: np.ndarray, param_max: np.ndarray) -> np.ndarray:

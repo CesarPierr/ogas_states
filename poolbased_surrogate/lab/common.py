@@ -7,7 +7,7 @@ import torch
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
-from .config import DDPMConfig, ExperimentConfig, PDEConfig, PoolConfig, SurrogateConfig, ValidationConfig, WandbConfig
+from ..config import DDPMConfig, ExperimentConfig, PDEConfig, PoolConfig, SurrogateConfig, ValidationConfig, WandbConfig
 
 
 def choose_device(name: str = "auto") -> torch.device:

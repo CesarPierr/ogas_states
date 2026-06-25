@@ -6,11 +6,11 @@ import numpy as np
 import time
 import torch
 from pathlib import Path
-from .data import TransitionPool
-from .models.surrogate import build_surrogate
-from .pde import PDE1D
-from .train import compute_transition_losses, normalize_losses, transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device, load_resolved_config, loss_norm_constants, stratified_split
+from ..data import TransitionPool
+from ..models.surrogate import build_surrogate
+from ..pde import PDE1D
+from ..train import compute_transition_losses, normalize_losses, transform_transition_losses
+from .common import assign_loss_quantile_bins, choose_device, load_resolved_config, loss_norm_constants, stratified_split
 
 
 def _validation_state_stats(validation_path: Path | None, fallback_arrays: list[np.ndarray]) -> tuple[float, float]:
@@ -32,8 +32,8 @@ def _recompute_losses_with_surrogate(
     device_name: str = "auto",
 ) -> np.ndarray:
     """Re-evaluate transition losses using the final trained surrogate."""
-    from .models.surrogate import build_surrogate
-    from .data import TransitionPool
+    from ..models.surrogate import build_surrogate
+    from ..data import TransitionPool
     device = choose_device(device_name)
     surrogate = build_surrogate(
         resolution=cfg.pde.resolution,
@@ -110,7 +110,7 @@ def build_loss_dataset_from_run(
     loss_norm = normalize_losses(losses)
     loss_norm_rmse = normalize_losses(transform_transition_losses(losses, "rmse"))
     # Training-pool normalization constants (q05/q95 per loss metric), persisted so
-    # scoring can renormalize generated losses on the TRAINING scale (see _lg_scoring).
+    # scoring can renormalize generated losses on the TRAINING scale (voir scoring.py).
     loss_norm_lo_mse, loss_norm_hi_mse = loss_norm_constants(losses)
     loss_norm_lo_rmse, loss_norm_hi_rmse = loss_norm_constants(transform_transition_losses(losses, "rmse"))
     loss_quantile_bins, quantile_edges = assign_loss_quantile_bins(losses, n_quantile_bins)

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 
-from poolbased_surrogate._lg_sweep import run_sweep
+from poolbased_surrogate.lab import run_sweep
 
 BB = {"generator": "flow_matching", "hidden": 64, "steps": 64, "residual_blocks": 2,
       "kernel_size": 7, "n_quantiles": 20}

@@ -8,13 +8,13 @@ import os
 import time
 import torch
 from pathlib import Path
-from .data import TransitionPool
-from .generator_metrics import amplitude_distribution_metrics, conditioning_fidelity_metrics, intra_bin_diversity_metrics, psd_similarity_metrics, state_quality_metrics
-from .models.surrogate import build_surrogate
-from .pde import PDE1D
-from .train import compute_transition_losses, normalize_losses, transform_transition_losses
-from ._lg_common import assign_loss_quantile_bins, choose_device, config_from_resolved_dict, normalize_losses_with
-from ._lg_generator import _sampling_strategies, sample_loss_generator
+from ..data import TransitionPool
+from ..generator_metrics import amplitude_distribution_metrics, conditioning_fidelity_metrics, intra_bin_diversity_metrics, psd_similarity_metrics, state_quality_metrics
+from ..models.surrogate import build_surrogate
+from ..pde import PDE1D
+from ..train import compute_transition_losses, normalize_losses, transform_transition_losses
+from .common import assign_loss_quantile_bins, choose_device, config_from_resolved_dict, normalize_losses_with
+from .generator import _sampling_strategies, sample_loss_generator
 
 
 def _load_validation_ref_states(cfg, n_max: int = 1024, rng: np.random.Generator | None = None) -> np.ndarray | None:

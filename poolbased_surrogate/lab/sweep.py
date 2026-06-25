@@ -5,8 +5,8 @@ import json
 import math
 import time
 from pathlib import Path
-from ._lg_scoring import score_generated_samples
-from ._lg_training import train_loss_generator
+from .scoring import score_generated_samples
+from .training import train_loss_generator
 
 
 SWEEP_CONFIGS = [

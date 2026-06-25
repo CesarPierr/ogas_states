@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-from poolbased_surrogate.loss_generator_lab import train_cli
+from poolbased_surrogate.lab import train_cli
 
 
 if __name__ == "__main__":
