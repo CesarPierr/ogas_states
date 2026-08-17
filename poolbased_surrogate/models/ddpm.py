@@ -191,6 +191,7 @@ class GeneratorStateMixin:
         loss: torch.Tensor | None,
         params: torch.Tensor | None,
         quantile_label: torch.Tensor | None,
+        amplitude: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Denoiser output with classifier-free guidance on the quantile label.
 
@@ -201,12 +202,12 @@ class GeneratorStateMixin:
         velocity/eps (state and, when present, param heads); the sampler's init
         logic (coloured-noise prior, edit-mode anchors) is unchanged.
         """
-        cond_out, cond_p = self(x, t, loss, params, quantile_label)
+        cond_out, cond_p = self(x, t, loss, params, quantile_label, amplitude=amplitude)
         scale = float(getattr(self, "cfg_scale", 1.0))
         if scale == 1.0 or quantile_label is None or getattr(self, "null_quant_embed", None) is None:
             return cond_out, cond_p
         drop_all = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
-        null_out, null_p = self(x, t, loss, params, quantile_label, cond_drop_mask=drop_all)
+        null_out, null_p = self(x, t, loss, params, quantile_label, cond_drop_mask=drop_all, amplitude=amplitude)
         out = null_out + scale * (cond_out - null_out)
         p = None if cond_p is None else null_p + scale * (cond_p - null_p)
         return out, p
@@ -249,6 +250,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         cfg_dropout: float = 0.0,
         cfg_scale: float = 1.0,
         cond_mode: str = "concat",
+        amplitude_conditional: bool = False,
     ):
         super().__init__()
         self.resolution = int(resolution)
@@ -260,6 +262,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         self.generate_params = self.param_mode == "generate"
         self.use_param_cond = self.param_mode in ("condition", "generate") and self.param_dim > 0
         self.n_quantiles = int(n_quantiles)
+        self.amplitude_conditional = bool(amplitude_conditional)
         _qed = int(quant_embed_dim) if quant_embed_dim > 0 else max(8, hidden // 8)
         self.quant_embed_dim = _qed if self.n_quantiles > 0 else 0
         if self.n_quantiles > 0:
@@ -274,14 +277,17 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
             self.null_quant_embed = nn.Parameter(torch.zeros(self.quant_embed_dim))
 
         n_loss = self.quant_embed_dim if self.n_quantiles > 0 else (1 if self.loss_conditional else 0)
+        n_amp = 1 if self.amplitude_conditional else 0
         n_pcond = self.param_dim if self.use_param_cond else 0
         self.cond = nn.Sequential(
-            nn.Linear(self.temb_dim + n_loss + n_pcond, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
+            nn.Linear(self.temb_dim + n_loss + n_amp + n_pcond, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
         )
         self.net = _build_conv_net(
             1 + hidden, hidden, kernel_size, residual_blocks,
             film_cond_dim=hidden if self.cond_mode == "film" else 0,
         )
+        if hasattr(torch, "compile"):
+            self.net = torch.compile(self.net)
         if self.generate_params:
             self.param_cond = nn.Sequential(
                 nn.Linear(self.temb_dim + n_loss + 1, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
@@ -324,11 +330,16 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         params: torch.Tensor | None,
         quantile_label: torch.Tensor | None = None,
         cond_drop_mask: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> torch.Tensor:
         parts = [timestep_embedding(t, self.temb_dim)]
         lf = self._loss_features(loss, quantile_label, cond_drop_mask)
         if lf is not None:
             parts.append(lf)
+        if self.amplitude_conditional:
+            if amplitude is None:
+                raise ValueError("amplitude_conditional is True but no amplitude was provided.")
+            parts.append(amplitude.view(amplitude.shape[0], 1))
         if self.use_param_cond:
             if params is None:
                 raise ValueError("param_mode requires param values.")
@@ -343,8 +354,9 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         params: torch.Tensor | None = None,
         quantile_label: torch.Tensor | None = None,
         cond_drop_mask: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        cond_vec = self._state_cond(t, loss, params, quantile_label, cond_drop_mask)
+        cond_vec = self._state_cond(t, loss, params, quantile_label, cond_drop_mask, amplitude)
         cond = cond_vec[:, :, None].expand(-1, -1, noisy.shape[-1])
         x_in = torch.cat([noisy, cond], dim=1)
         state_eps = self.net(x_in, cond_vec) if self.cond_mode == "film" else self.net(x_in)
@@ -366,6 +378,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         sample_weight: torch.Tensor | None = None,
         param_loss_weight: float = 1.0,
         quantile_label: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz = clean.shape[0]
         t = torch.randint(0, self.steps, (bsz,), device=clean.device)
@@ -380,7 +393,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         else:
             state_in = params if self.use_param_cond else None
         drop_mask = self._cfg_drop_mask(bsz, clean.device, quantile_label)
-        pred, pred_p = self(noisy, t, loss, state_in, quantile_label, drop_mask)
+        pred, pred_p = self(noisy, t, loss, state_in, quantile_label, drop_mask, amplitude)
         per_sample = torch.mean((pred - eps) ** 2, dim=(1, 2))
         if self.generate_params:
             per_sample = per_sample + param_loss_weight * torch.mean((pred_p - eps_p) ** 2, dim=1)
@@ -400,6 +413,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         quantile_label: torch.Tensor | None = None,
         init_state: torch.Tensor | None = None,
         t_start: float = 0.0,
+        amplitude: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if init_state is not None and t_start > 0.0:
             raise NotImplementedError("edit-mode sampling is only implemented for FlowMatching1D")
@@ -416,7 +430,7 @@ class DDPM1D(GeneratorStateMixin, nn.Module):
         for step in reversed(range(self.steps)):
             t = torch.full((n,), step, device=device, dtype=torch.long)
             state_in = p if self.generate_params else params
-            eps, eps_p = self._cfg_output(x, t, loss, state_in, quantile_label)
+            eps, eps_p = self._cfg_output(x, t, loss, state_in, quantile_label, amplitude)
             alpha = self.alpha[step]
             ab = self.alpha_bar[step]
             beta = self.beta[step]
@@ -471,6 +485,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         cfg_dropout: float = 0.0,
         cfg_scale: float = 1.0,
         cond_mode: str = "concat",
+        amplitude_conditional: bool = False,
     ):
         super().__init__()
         self.resolution = int(resolution)
@@ -482,6 +497,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         self.generate_params = self.param_mode == "generate"
         self.use_param_cond = self.param_mode in ("condition", "generate") and self.param_dim > 0
         self.n_quantiles = int(n_quantiles)
+        self.amplitude_conditional = bool(amplitude_conditional)
         _qed = int(quant_embed_dim) if quant_embed_dim > 0 else max(8, hidden // 8)
         self.quant_embed_dim = _qed if self.n_quantiles > 0 else 0
         if self.n_quantiles > 0:
@@ -496,14 +512,17 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
             self.null_quant_embed = nn.Parameter(torch.zeros(self.quant_embed_dim))
 
         n_loss = self.quant_embed_dim if self.n_quantiles > 0 else (1 if self.loss_conditional else 0)
+        n_amp = 1 if self.amplitude_conditional else 0
         n_pcond = self.param_dim if self.use_param_cond else 0
         self.cond = nn.Sequential(
-            nn.Linear(self.temb_dim + n_loss + n_pcond, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
+            nn.Linear(self.temb_dim + n_loss + n_amp + n_pcond, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
         )
         self.net = _build_conv_net(
             1 + hidden, hidden, kernel_size, residual_blocks,
             film_cond_dim=hidden if self.cond_mode == "film" else 0,
         )
+        if hasattr(torch, "compile"):
+            self.net = torch.compile(self.net)
         if self.generate_params:
             self.param_cond = nn.Sequential(
                 nn.Linear(self.temb_dim + n_loss + 1, hidden), nn.SiLU(), nn.Linear(hidden, hidden)
@@ -542,11 +561,16 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         params: torch.Tensor | None,
         quantile_label: torch.Tensor | None = None,
         cond_drop_mask: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> torch.Tensor:
         parts = [self._time_embedding(t)]
         lf = self._loss_features(loss, quantile_label, cond_drop_mask)
         if lf is not None:
             parts.append(lf)
+        if self.amplitude_conditional:
+            if amplitude is None:
+                raise ValueError("amplitude_conditional is True but no amplitude was provided.")
+            parts.append(amplitude.view(amplitude.shape[0], 1))
         if self.use_param_cond:
             if params is None:
                 raise ValueError("param_mode requires param values.")
@@ -561,8 +585,9 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         params: torch.Tensor | None = None,
         quantile_label: torch.Tensor | None = None,
         cond_drop_mask: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        cond_vec = self._state_cond(t, loss, params, quantile_label, cond_drop_mask)
+        cond_vec = self._state_cond(t, loss, params, quantile_label, cond_drop_mask, amplitude)
         cond = cond_vec[:, :, None].expand(-1, -1, state.shape[-1])
         x_in = torch.cat([state, cond], dim=1)
         state_v = self.net(x_in, cond_vec) if self.cond_mode == "film" else self.net(x_in)
@@ -584,6 +609,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         sample_weight: torch.Tensor | None = None,
         param_loss_weight: float = 1.0,
         quantile_label: torch.Tensor | None = None,
+        amplitude: torch.Tensor | None = None,
     ) -> torch.Tensor:
         bsz = clean.shape[0]
         t = torch.rand((bsz,), device=clean.device)
@@ -600,7 +626,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         else:
             state_in = params if self.use_param_cond else None
         drop_mask = self._cfg_drop_mask(bsz, clean.device, quantile_label)
-        pred_v, pred_param_v = self(mixed, t, loss, state_in, quantile_label, drop_mask)
+        pred_v, pred_param_v = self(mixed, t, loss, state_in, quantile_label, drop_mask, amplitude)
         per_sample = torch.mean((pred_v - target_v) ** 2, dim=(1, 2))
         if self.generate_params:
             target_param_v = params - param_noise
@@ -621,6 +647,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         quantile_label: torch.Tensor | None = None,
         init_state: torch.Tensor | None = None,
         t_start: float = 0.0,
+        amplitude: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Integrate the learned velocity field from base noise (or, in edit mode,
         from a partially re-noised real anchor) to the data distribution.
@@ -652,7 +679,7 @@ class FlowMatching1D(GeneratorStateMixin, nn.Module):
         for i in range(n_int):
             t = torch.full((n,), t0 + i * dt, device=device, dtype=torch.float32)
             state_in = p if self.generate_params else params
-            v, pv = self._cfg_output(x, t, loss, state_in, quantile_label)
+            v, pv = self._cfg_output(x, t, loss, state_in, quantile_label, amplitude)
             x = x + dt * v
             if self.generate_params:
                 p = p + dt * pv

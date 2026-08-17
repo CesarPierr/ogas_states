@@ -1,0 +1,93 @@
+seed: 101
+device: cuda
+output_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/burgers_hard/base
+
+# Burgers GENERALITY experiment HARD config.
+# Derived from configs/leonardo_burgers_base.yaml. The base regime (viscosity
+# [0.003, 0.03], 5 rounds) has NO HEADROOM: uniform already nearly solves it
+# (midk tube nrmse_p50 ~0.007, highk ~0.038, bulk ~0.0005) so active sampling has
+# nothing to gain. This config LOWERS VISCOSITY ~10x -> [0.0003, 0.003] for sharper
+# shocks (harder to predict) and gives the active method more ramp by raising
+# pool.rounds 5 -> 10 (on KS rank_corr took ~7 rounds to reach 0.8). Pool kept small
+# (n_trajectories 100, trajectory_steps 30) because the Burgers solver runs at
+# batch_size=1 with adaptive dt and is slow. NEW validation paths (burgers_hard_*).
+# Arms override ddpm/pool/surrogate knobs on the command line via --set.
+
+pde:
+  name: burgers
+  backend: al4pde
+  resolution: 256
+  domain_length: 1.0
+  dt: 0.0002
+  viscosity_range: [0.0003, 0.003]
+  param_ranges:
+    - [0.0003, 0.003]
+  param_log_scale: [true]
+  ic:
+    modes: 5
+    amplitude: 1.0
+
+pool:
+  rounds: 10
+  trajectory_steps: 30
+  n_trajectories: 100
+  uniform_fraction: 0.5
+  strategy: generator
+
+surrogate:
+  hidden: 64
+  depth: 4
+  ensemble_size: 2
+  ensemble_bootstrap: true
+  epochs_per_round: 15
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  difficulty_signal: ensemble_var
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 128
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 2048
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+  # --- v3 conditioning hygiene (mirrors leonardo_ks_v3_base) ---
+  difficulty_from: pretrain
+  difficulty_stats: ema
+  difficulty_stats_momentum: 0.7
+  self_train_weight: 0.3
+  noise_prior: spectrum
+  candidate_factor: 4
+  realism_tv_gate: 3.0
+  sample_mode: scratch          # gen_phys_tv_edit / gen_v3_edit arms override to edit
+
+validation:
+  n_trajectories: 300
+  trajectory_steps: 50
+  path: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/burgers_hard_bank.npz
+  hard_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/burgers_hard_suite
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 50
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: burgers_hard

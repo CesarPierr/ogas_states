@@ -63,6 +63,9 @@ def main(argv=None) -> None:
     ap.add_argument("--n_traj", type=int, default=512)
     ap.add_argument("--baseline", default="uniform_baseline")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--eval-mode", choices=["ensemble", "single_member", "both"], default="both",
+                    help="Evaluate ensemble average, single member (member 0), or both")
+    ap.add_argument("--out", default="rollout_analysis_v2.json", help="Path to output JSON")
     args = ap.parse_args(argv)
     device = torch.device(args.device)
     val = load_validation(Path(args.uniform))
@@ -84,15 +87,24 @@ def main(argv=None) -> None:
         except TypeError:
             ck = torch.load(ckptp, map_location=device, weights_only=False)
         model.load_state_dict(ck["surrogate"])
-        ser = rollout_error_series(model, val, steps=steps, device=device, n_trajectories=args.n_traj)
-        rec = {"nrmse@10": float(ser["nrmse_mean"][min(9, steps - 1)]),
-               "nrmse@50": float(ser["nrmse_mean"][min(49, steps - 1)]),
-               "nrmse@final": float(ser["nrmse_mean"][-1])}
-        for t in args.tau:
-            rec[f"Ktau_mean_{t}"] = k_tau(ser["nrmse_mean"], ser["step"], t)
-            rec[f"Ktau_p95_{t}"] = k_tau(ser["nrmse_p95"], ser["step"], t)
-        agg[variant].append(rec)
-        print(f"  {variant} seed{m.group(2)}: nrmse@final={rec['nrmse@final']:.3f}", flush=True)
+        
+        eval_targets = []
+        if args.eval_mode in ("ensemble", "both"):
+            eval_targets.append((model, variant))
+        if args.eval_mode in ("single_member", "both") and model.n_models > 1:
+            single_m = EnsembleSurrogate([model.models[0]])
+            eval_targets.append((single_m, f"{variant}__single_member"))
+            
+        for m_eval, v_name in eval_targets:
+            ser = rollout_error_series(m_eval, val, steps=steps, device=device, n_trajectories=args.n_traj)
+            rec = {"nrmse@10": float(ser["nrmse_mean"][min(9, steps - 1)]),
+                   "nrmse@50": float(ser["nrmse_mean"][min(49, steps - 1)]),
+                   "nrmse@final": float(ser["nrmse_mean"][-1])}
+            for t in args.tau:
+                rec[f"Ktau_mean_{t}"] = k_tau(ser["nrmse_mean"], ser["step"], t)
+                rec[f"Ktau_p95_{t}"] = k_tau(ser["nrmse_p95"], ser["step"], t)
+            agg[v_name].append(rec)
+            print(f"  {v_name} seed{m.group(2)}: nrmse@final={rec['nrmse@final']:.3f}", flush=True)
 
     variants = sorted(agg.keys())
     fields = (["nrmse@10", "nrmse@50", "nrmse@final"]
@@ -126,6 +138,12 @@ def main(argv=None) -> None:
                     row += f"{(mn / bm if bm else float('nan')):>13.2f}x"
             print(row)
 
+
+    # Save to JSON
+    out_path = Path(args.out)
+    with open(out_path, "w") as f:
+        json.dump(agg, f, indent=2)
+    print(f"\nSaved rollout metrics to {out_path}")
 
 if __name__ == "__main__":
     main()

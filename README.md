@@ -8,6 +8,18 @@ trajectory generation while keeping or improving surrogate quality.
 No Melissa. No ICML runtime dependency. Code is intentionally small and easy to
 modify.
 
+## Onboarding
+
+If you are discovering the project, start with the guided mini-MOOC:
+
+```text
+docs/mooc_decouverte.md
+notebooks/mooc_00_project_map.ipynb
+notebooks/mooc_01_data_pde_pool.ipynb
+notebooks/mooc_02_results_investigations.ipynb
+notebooks/mooc_03_research_next_steps.ipynb
+```
+
 ## Pipeline
 
 One data sample is one transition:

@@ -77,6 +77,13 @@ def evaluate_generator(
         return {}
     quantile_edges = np.asarray(quantile_edges, dtype=np.float32)
 
+    amplitude_cond = None
+    if getattr(ddpm, "amplitude_conditional", False):
+        if val_ref_states is not None and len(val_ref_states) > 0:
+            ref_amps = np.sqrt(np.mean(val_ref_states**2, axis=(1, 2)))
+            amps = rng.uniform(ref_amps.min(), ref_amps.max(), size=n_eval).astype(np.float32)
+            amplitude_cond = torch.from_numpy(amps / state_std).to(device)
+
     # 1. Probe targets: uniform across all bins so target/realized correlation is identifiable.
     target_bins = sample_quantile_labels("uniform", n_eval, n_quantiles, rng)
     # 2. Params drawn uniformly (the prod conditioning prior) and conditioned on.
@@ -91,6 +98,7 @@ def evaluate_generator(
         device=device,
         temperature=1.0,
         quantile_label=qlabel,
+        amplitude=amplitude_cond,
     )
     states = (state_norm.cpu().numpy() * state_std + state_mean).astype(np.float32)
     if ddpm.generate_params and gen_p is not None:

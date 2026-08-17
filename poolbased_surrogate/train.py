@@ -279,12 +279,17 @@ def train_ddpm(
     else:
         qbins_t = torch.zeros(len(state_norm), dtype=torch.int64)
 
-    dataset = TensorDataset(
+    dataset_tensors = [
         torch.from_numpy(state_norm),
         torch.from_numpy(losses.reshape(-1, 1).astype(np.float32)),
         torch.from_numpy(param_scaled),
         qbins_t,
-    )
+    ]
+    if getattr(ddpm, "amplitude_conditional", False):
+        amps = np.sqrt(np.mean(pool.next_states**2, axis=(1, 2)))
+        amps_norm = (amps / state_std).astype(np.float32)
+        dataset_tensors.append(torch.from_numpy(amps_norm.reshape(-1, 1)))
+    dataset = TensorDataset(*dataset_tensors)
     # Sampler weights: balanced-per-bin (quantile mode) x anti-self-feed down-weight
     # of generator-sourced states (the generator anchors to solver/uniform states).
     weights = np.ones(len(state_norm), dtype=np.float64)
@@ -307,8 +312,14 @@ def train_ddpm(
     sample_weight_power = float(sample_weight_power)
     for epoch in range(epochs):
         epoch_losses = []
-        for state, loss_value, params, qbin in loader:
+        for batch in loader:
             opt.zero_grad(set_to_none=True)
+            state = batch[0]
+            loss_value = batch[1]
+            params = batch[2]
+            qbin = batch[3]
+            amp_val = batch[4].to(device) if len(batch) > 4 else None
+
             norm_loss = loss_value.to(device)
             loss_cond = norm_loss * loss_condition_scale if mode == "conditional_loss" else None
             sample_weight = (
@@ -325,6 +336,7 @@ def train_ddpm(
                 sample_weight=sample_weight,
                 param_loss_weight=param_loss_weight,
                 quantile_label=quantile_label,
+                amplitude=amp_val,
             )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(ddpm.parameters(), 1.0)

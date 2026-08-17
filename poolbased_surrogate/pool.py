@@ -206,6 +206,7 @@ def generate_states_and_params(
     anchors_phys: np.ndarray | None = None,
     sample_mode: str = "scratch",
     edit_t0: float = 0.6,
+    previous: TransitionPool | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Generate states (physical units), their PDE parameters, and the requested
     difficulty bin per kept state (-1 where not applicable).
@@ -266,6 +267,14 @@ def generate_states_and_params(
                     "t_start": float(edit_t0),
                 }
 
+            amplitude_cond = None
+            if getattr(ddpm, "amplitude_conditional", False) and previous is not None:
+                prev_amps = np.sqrt(np.mean(previous.next_states**2, axis=(1, 2)))
+                # Propose target amplitudes: sample uniformly between min and max of previous pool target amplitudes
+                # scaled by state_std
+                amps = rng.uniform(prev_amps.min(), prev_amps.max(), size=want).astype(np.float32)
+                amplitude_cond = torch.from_numpy(amps / state_std).to(device)
+
             if ddpm.param_mode == "condition":
                 normed = sample_normalized_params(want, ddpm.param_dim, rng, param_prior)
                 param_scaled = torch.from_numpy(2.0 * normed - 1.0).to(device)
@@ -276,6 +285,7 @@ def generate_states_and_params(
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    amplitude=amplitude_cond,
                     **edit_kwargs,
                 )
                 params_phys = pde.denormalize_params(normed)
@@ -287,6 +297,7 @@ def generate_states_and_params(
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    amplitude=amplitude_cond,
                     **edit_kwargs,
                 )
                 normed = ((p_scaled.clamp(-1.0, 1.0).cpu().numpy() + 1.0) / 2.0).astype(np.float32)
@@ -299,6 +310,7 @@ def generate_states_and_params(
                     device=device,
                     temperature=sample_temperature,
                     quantile_label=quantile_label,
+                    amplitude=amplitude_cond,
                     **edit_kwargs,
                 )
                 if param_prior == "uniform":
@@ -426,11 +438,13 @@ def make_strategy_transitions(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Baselines SANS générateur pour la moitié non-uniforme (1 pas de solveur par état gardé).
 
-    random_tube : ancres + perturbations basse-fréquence aléatoires (ni apprentissage, ni sélection).
-    tube_select : random_tube (SOURCE) + mined_ic (SÉLECTION) — oversample x candidate_factor puis
-                  garde les plus durs. Ablation qui isole la valeur de la sélection (vs random_tube)
-                  et celle de la génération apprise (vs gen_v3_edit).
-    mined_ic    : candidate_factor x IC aléatoires, garde les plus durs (sélection sans génération).
+    random_tube    : ancres + perturbations basse-fréquence aléatoires (ni apprentissage, ni sélection).
+    tube_select    : random_tube (SOURCE) + sélection par désaccord — oversample x candidate_factor puis
+                     garde les plus durs. Ablation qui isole la valeur de la sélection sur des
+                     perturbations hors-attracteur.
+    mined_ic       : candidate_factor x IC aléatoires, garde les plus durs (sélection sans génération).
+    uniform_select : ancres uniformes ON-ATTRACTOR + sélection par désaccord — isole la valeur du
+                     modèle génératif par rapport au simple tri actif de données d'attracteur.
     """
     if strategy == "random_tube":
         anchor_idx = rng.choice(len(anchors), size=n, replace=len(anchors) < n)
@@ -443,6 +457,12 @@ def make_strategy_transitions(
         return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
     if strategy == "mined_ic":
         cand = pde.sample_ic_uniform(want, rng)
+        return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
+    if strategy == "uniform_select":
+        # On-attractor active selection: oversample anchors (real attractor states),
+        # rank by ensemble disagreement, keep the N most uncertain.
+        anchor_idx = rng.choice(len(anchors), size=want, replace=len(anchors) < want)
+        cand = anchors[anchor_idx].astype(np.float32)
         return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
     raise ValueError(f"pool.strategy inconnue : {strategy!r}")
 
@@ -498,7 +518,7 @@ def make_mixed_pool(
 
     # Generator-free baseline strategies fill the non-uniform half with single-step
     # transitions at exactly one solver step per kept state (budget-matched).
-    if n_generated_traj > 0 and strategy in ("random_tube", "tube_select", "mined_ic"):
+    if n_generated_traj > 0 and strategy in ("random_tube", "tube_select", "mined_ic", "uniform_select"):
         n_generated = n_generated_traj * steps
         states0, params = make_strategy_transitions(
             strategy, pde, surrogate, anchors, n_generated, rng, device, solver_batch_size,
@@ -561,6 +581,7 @@ def make_mixed_pool(
                 loss_condition_scale=loss_condition_scale,
                 sample_strategy=sample_strategy,
                 sample_strategy_temp=sample_strategy_temp,
+                previous=previous,
             )
             traj_attempt = safe_simulate_trajectories(
                 pde,
@@ -644,6 +665,7 @@ def make_mixed_pool(
                 anchors_phys=anchors,
                 sample_mode=sample_mode,
                 edit_t0=edit_t0,
+                previous=previous,
             )
 
             next_state_attempt = safe_step_transitions(

@@ -85,6 +85,7 @@ class DDPMConfig:
     residual_blocks: int = 0
     kernel_size: int = 5
     loss_metric: str = "mse"
+    amplitude_conditional: bool = False
     # Difficulty signal used to bin the pool for quantile conditioning:
     #   "loss"         -> surrogate one-step error (loss_metric: mse/rmse/nrmse)
     #   "ensemble_var" -> epistemic disagreement (variance across ensemble members);

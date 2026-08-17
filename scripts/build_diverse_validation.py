@@ -283,10 +283,21 @@ def main(argv=None) -> None:
         print(f"  {name}: cand={len(cand)} -> diversity={len(div)} -> stratified={len(state)} "
               f"({entry['n_unique_source_trajectories']} unique trajectories)")
 
+    # ---------------- Original sets + p05, p10, p15 variants ----------------
+    for p in [5, 10, 15]:
+        thr_tv = np.quantile(tv_flat, 1.0 - p/100.0)
+        build_hard(f"val_hard_tv_div_p{p:02d}", np.where(tv_flat >= thr_tv)[0], tv_flat,
+                   f"top-{p}% input-state total variation", random_in_cell=False)
+    # Alias for backward compatibility
     thr_tv = np.quantile(tv_flat, 0.95)
     build_hard("val_hard_tv_div", np.where(tv_flat >= thr_tv)[0], tv_flat,
                "top-5% input-state total variation", random_in_cell=False)
 
+    for p in [5, 10, 15]:
+        thr_amp = np.quantile(rms_flat, p/100.0)
+        build_hard(f"val_hard_lowamp_div_p{p:02d}", np.where(rms_flat <= thr_amp)[0], -rms_flat,
+                   f"smallest-{p}% target-state RMS", random_in_cell=False)
+    # Alias for backward compatibility
     thr_amp = np.quantile(rms_flat, 0.05)
     build_hard("val_hard_lowamp_div", np.where(rms_flat <= thr_amp)[0], -rms_flat,
                "smallest-5% target-state RMS", random_in_cell=False)

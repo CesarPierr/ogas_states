@@ -20,12 +20,15 @@ import numpy as np
 from scipy.stats import mannwhitneyu, ttest_ind
 
 ARMS = ["uniform_baseline", "noise_inject", "random_tube", "tube_select", "mined_ic",
+        "uniform_select",
         "gen_v3", "gen_v3_edit", "gen_v3_guard", "gen_v3_cfg", "gen_v3_cfg2",
         # pure-conditioning research (no ensemble, no selection):
         "gen_pure", "gen_pure_edit", "gen_phys_tv", "gen_phys_spec",
         "gen_phys_tv_edit", "gen_phys_spec_edit"]
 SEEDS = [101, 202, 303, 404, 505, 606, 707, 808, 909, 1010]
 SETS = ["val_hard_tv_div", "val_hard_lowamp_div", "val_hard_mixed_div",
+        "val_hard_tv_div_p05", "val_hard_tv_div_p10", "val_hard_tv_div_p15",
+        "val_hard_lowamp_div_p05", "val_hard_lowamp_div_p10", "val_hard_lowamp_div_p15",
         "val_tube_lowk_rho0p1", "val_tube_lowk_rho0p25", "val_tube_lowk_rho0p5",
         "val_tube_midk_rho0p1", "val_tube_midk_rho0p25", "val_tube_midk_rho0p5",
         "val_tube_highk_rho0p1", "val_tube_highk_rho0p25", "val_tube_highk_rho0p5"]

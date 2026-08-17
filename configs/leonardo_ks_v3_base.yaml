@@ -1,0 +1,97 @@
+seed: 101
+device: auto
+output_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ks800_v3_pilot/base
+
+# V3 method base config. Inherits phase2 KS setup (res800, sub5, ensemble2, flow-matching
+# with nq20/top_half) and layers on the v3 conditioning hygiene + generation improvements:
+#   - difficulty_from: pretrain      (honest out-of-sample difficulty labelling)
+#   - difficulty_stats: ema          (stationary cross-round normalisation)
+#   - self_train_weight: 0.3         (anchor generator training to solver states)
+#   - noise_prior: spectrum          (coloured Gaussian matched to pool power spectrum)
+#   - candidate_factor: 4            (oversample x4, keep top by ensemble disagreement)
+#   - realism_tv_gate: 3.0           (drop candidates with TV > 3x p99 uniform TV)
+#   - sample_mode: scratch           (default; gen_v3_edit arm overrides to edit)
+#   - ensemble_bootstrap: true       (bootstrap resampling for ensemble decorrelation)
+
+pde:
+  name: ks
+  resolution: 800
+  domain_length: 64.0
+  dt: 0.05
+  param_ranges:
+    - [0.5, 4.0]
+    - [10.0, 100.0]
+  param_log_scale: [false, false]
+  n_substeps: 5
+  n_warmup: 20
+  ic:
+    N: 10
+    lmin: 1
+    lmax: 10
+    amplitude: 1.0
+
+pool:
+  rounds: 10
+  trajectory_steps: 70
+  n_trajectories: 250
+  uniform_fraction: 0.5
+  strategy: generator   # swept per arm: generator / random_tube / mined_ic
+
+surrogate:
+  hidden: 64
+  depth: 4
+  ensemble_size: 2
+  ensemble_bootstrap: true   # bootstrap resampling -> better decorrelated disagreement
+  epochs_per_round: 15
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  difficulty_signal: ensemble_var
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 128
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 16384
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+  # --- v3 additions ---
+  difficulty_from: pretrain          # out-of-sample difficulty (was posttrain)
+  difficulty_stats: ema              # stationary cross-round bin normalisation
+  difficulty_stats_momentum: 0.7
+  self_train_weight: 0.3             # down-weight own outputs in generator training
+  noise_prior: spectrum              # coloured Gaussian base distribution
+  candidate_factor: 4                # oversample x4 then select by ensemble disagreement
+  realism_tv_gate: 3.0               # drop candidates with TV > 3x p99 uniform TV
+  sample_mode: scratch               # gen_v3_edit arm overrides to edit
+
+validation:
+  n_trajectories: 1500
+  trajectory_steps: 100
+  path: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/ks_res800_al4pde_sub5_seed43_n1500_t100.npz
+  # hard_dir was: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/hard_sub5
+  hard_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/ks_diverse_suite
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 100
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: ks800_v3_pilot

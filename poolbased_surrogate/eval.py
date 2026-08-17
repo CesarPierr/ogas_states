@@ -165,6 +165,12 @@ def evaluate_one_step_validation(
     metrics = {
         f"{prefix}/rmse_mean": float(rmse.mean()),
         f"{prefix}/nrmse_mean": float(nrmse.mean()),
+        f"{prefix}/rmse_std": float(rmse.std()),
+        f"{prefix}/nrmse_std": float(nrmse.std()),
+        f"{prefix}/rmse_min": float(rmse.min()),
+        f"{prefix}/nrmse_min": float(nrmse.min()),
+        f"{prefix}/rmse_max": float(rmse.max()),
+        f"{prefix}/nrmse_max": float(nrmse.max()),
     }
     for q in quantiles:
         label = quantile_label(q)

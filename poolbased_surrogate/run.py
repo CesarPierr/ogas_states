@@ -197,6 +197,7 @@ def main(argv: list[str] | None = None) -> None:
         cfg_dropout=cfg.ddpm.cfg_dropout,
         cfg_scale=cfg.ddpm.cfg_scale,
         cond_mode=cfg.ddpm.cond_mode,
+        amplitude_conditional=cfg.ddpm.amplitude_conditional,
     ).to(device)
     checkpoint = out / "checkpoint_latest.pt"
     start_round = 0
