@@ -26,7 +26,7 @@ class ExactAL4PDEUnet1D(nn.Module):
     ):
         super().__init__()
         ensure_al4pde_paths()
-        from al4pde.modules.unet_cond import Unet1D
+        from al4pde.modules.unet_cond_1d import Unet1D
         self.net = Unet1D(
             dim=1,
             num_channels=n_channels,
