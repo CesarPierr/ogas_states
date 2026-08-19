@@ -114,6 +114,7 @@ def build_report():
         "/leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ks800_v3_pilot",
         "/leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ks800_heuristic_tube",
         "/leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ks800_m1_improvements",
+        "/leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ks800_classical_al",
     ]
     
     runs = load_all_runs(base_dirs)
