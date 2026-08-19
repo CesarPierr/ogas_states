@@ -36,9 +36,10 @@ from poolbased_surrogate.eval import (
 from poolbased_surrogate.models.surrogate import (
     EnsembleSurrogate,
     ExactAL4PDEUnet1D,
-    Surrogate1D,
+    build_surrogate,
 )
-from poolbased_surrogate.pde import PDE1D
+from poolbased_surrogate.pde import PDE
+
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 VAL_ROOT = Path("/leonardo_scratch/fast/EUHPC_D36_033/ogas_validation")
@@ -77,20 +78,20 @@ def load_model_from_checkpoint(ckpt_path: Path, device: torch.device):
     ens_size = surr_cfg.get("ensemble_size", 1)
     diff_weight = surr_cfg.get("difference_weight", 0.3)
     
-    # Instantiate models
-    models = []
-    for _ in range(ens_size):
-        m = ExactAL4PDEUnet1D(
-            in_channels=1,
-            out_channels=1,
-            param_dim=2,
-            hidden_channels=hidden,
-            depth=depth,
-            difference_weight=diff_weight,
-        )
-        models.append(m)
-        
-    surrogate = EnsembleSurrogate(models=models).to(device)
+    pde_cfg = cfg.get("pde", {})
+    param_dim = pde_cfg.get("param_dim", 2)
+    spatial_dim = pde_cfg.get("spatial_dim", 1)
+    resolution = pde_cfg.get("resolution", 800)
+    
+    surrogate = build_surrogate(
+        resolution=resolution,
+        hidden=hidden,
+        depth=depth,
+        ensemble_size=ens_size,
+        param_dim=param_dim,
+        difference_weight=diff_weight,
+        spatial_dim=spatial_dim,
+    ).to(device)
     
     # Load state dict
     if "surrogate" in payload:
