@@ -1,504 +1,213 @@
-# Pool-Based Surrogate 1D
+# OGAS: Operator-Guided Generative Active Sampling for Neural PDE Surrogates
 
-Autonomous experimental repo for 1D pool-based active surrogate learning.
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch 2.4+](https://img.shields.io/badge/PyTorch-2.4+-EE4C2C.svg)](https://pytorch.org/)
+[![JAX / JAX-CFD](https://img.shields.io/badge/JAX-0.4+-red.svg)](https://github.com/google/jax)
+[![AL4PDE Symmetrical](https://img.shields.io/badge/AL4PDE-Parity-green.svg)](https://github.com/tum-pbs/al4pde)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Goal: test whether a generative state sampler can replace part of fresh uniform
-trajectory generation while keeping or improving surrogate quality.
+**OGAS** (*Operator-Guided Active Sampling*) is an active learning framework designed to train neural PDE surrogates (Neural Operators, Conditioned U-Nets, FNOs) with maximum sample efficiency and rollout stability.
 
-No Melissa. No ICML runtime dependency. Code is intentionally small and easy to
-modify.
+Instead of passively collecting trajectory snapshots along standard PDE solver attractors, OGAS actively probes the state space. It leverages **conditional generative modeling (Optimal Transport Flow Matching / DDPM)** to synthesize challenging, out-of-attractor, and boundary physical states conditioned on surrogate error/uncertainty quantiles, which are then queried via exact numerical solvers.
 
-## Onboarding
+---
 
-If you are discovering the project, start with the guided mini-MOOC:
+## 📖 Table of Contents
+1. [Scientific Motivation & Core Idea](#-scientific-motivation--core-idea)
+2. [How OGAS Works: The Active Loop](#-how-ogas-works-the-active-loop)
+3. [Supported Equations & Solvers](#-supported-equations--solvers)
+4. [Acquisition Strategies](#-acquisition-strategies)
+5. [Repository Structure](#-repository-structure)
+6. [Quickstart (< 5 minutes)](#-quickstart--5-minutes)
+7. [Cluster Deployment on HPC (SLURM / Leonardo Booster)](#-cluster-deployment-on-hpc-slurm--leonardo-booster)
+8. [Analysis & Publication Figures](#-analysis--publication-figures)
+9. [Key References & Documentation Pointers](#-key-references--documentation-pointers)
 
-```text
-docs/mooc_decouverte.md
-notebooks/mooc_00_project_map.ipynb
-notebooks/mooc_01_data_pde_pool.ipynb
-notebooks/mooc_02_results_investigations.ipynb
-notebooks/mooc_03_research_next_steps.ipynb
+---
+
+## 🔬 Scientific Motivation & Core Idea
+
+Neural surrogate models $u_{t+1} \approx \mathcal{S}_\theta(u_t, \mu)$ trained purely on unperturbed numerical solver trajectories suffer from **autoregressive error accumulation**:
+1. During long rollouts, small prediction errors push the surrogate outside the narrow manifold of training attractors.
+2. Once off-manifold, the surrogate encounters unfamiliar states and quickly diverges (spectral explosion, non-physical shocks).
+3. Standard Active Learning (e.g., querying trajectories with highest ensemble variance) is computationally inefficient because it requires rolling out entire candidate trajectories ($10\times$ solver overhead) only to discard most points.
+
+**The OGAS Solution**:
+- OGAS trains a **conditional generative model** $p_\phi(u \mid c)$ (where $c \in [0, 1]$ represents the surrogate loss quantile or difficulty target).
+- In each round $R$, OGAS samples states directly in high-loss regions of state space, evaluates one single solver step $u_{t+1} = \text{Solver}(u_t, \mu)$, and updates both the surrogate and the generator.
+- This creates a **stabilizing "tube" of data** around the attractor, granting robust multi-step rollouts and superior out-of-distribution generalization.
+
+```
+       ┌─────────────────────────────────────────────────────────────┐
+       │                 OGAS ACTIVE LEARNING ROUND                  │
+       └─────────────────────────────────────────────────────────────┘
+                                      │
+              ┌───────────────────────┴───────────────────────┐
+              ▼                                               ▼
+    [ Uniform Solver Pool ]                       [ Generative Proposal ]
+  100% Attractor Trajectories                  Flow Matching / Pushforward
+    (50% of round budget)                         (50% of round budget)
+              │                                               │
+              └───────────────────────┬───────────────────────┘
+                                      ▼
+                       [ Unified Transition Pool ]
+                       (u_t, \mu) -> u_{t+1}
+                                      │
+                                      ▼
+                       [ Train Surrogate Ensemble ]
+                          \mathcal{S}_\theta(u_t, \mu)
+                                      │
+                                      ▼
+                       [ Train Conditional Generator ]
+                             p_\phi(u \mid loss)
+                                      │
+                                      ▼
+                       [ 100% GPU Vectorized Eval ]
+                   (Attractor, Tube, Sobolev, Rollouts)
 ```
 
-## Pipeline
+---
 
-One data sample is one transition:
+## 🌊 Supported Equations & Solvers
 
-```text
-(state_t, pde_parameter) -> state_{t+1}
+OGAS uses native integrations with **AL4PDE** and **PDEBench** to guarantee 100% architectural parity across 1D and 2D:
+
+| PDE Equation | Dimension | Physics | Parameters ($\mu$) | Solver Backend |
+|---|---|---|---|---|
+| **Kuramoto-Sivashinsky (KS)** | 1D Periodic | Chaotic spatiotemporal turbulence, flame front flutter | Length $L \in [0.5, 4.0]$, Viscosity $\nu$ | Pseudo-spectral (JAX) |
+| **Viscous Burgers** | 1D Periodic | Non-linear advection & shock formation | Viscosity $\nu \in [10^{-3}, 10^{-1}]$ | Finite Difference / Spectral |
+| **Navier-Stokes (Kolmogorov)** | 2D Incompressible | 2D Vortex shedding, turbulent energy cascade | Viscosity $\eta, \zeta \in [10^{-4}, 10^{-1}]$ | AL4PDE `CFDSim` (JAX-CFD) |
+
+---
+
+## 🎯 Acquisition Strategies
+
+All strategies are unified under [`poolbased_surrogate/strategies.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/strategies.py):
+
+1. **`uniform_baseline`** : Standard passive sampling. 100% full solver trajectories from uniform initial conditions.
+2. **`heuristic_tube`** : 50% Uniform + 50% spectral perturbations around attractor trajectories. Proves that exploring off-manifold state space improves rollouts.
+3. **`classic_al_topk` / `classic_al_sbal`** : Classical pool-based Active Learning. Generates $10\times$ solver candidate trajectories, scores them by Ensemble Variance ($M \ge 3$) or Residual Loss ($M=1$), and acquires Top-K or SBAL ($\alpha=1.0$) states.
+4. **`ogas_generative` (Flow Matching & Pushforward)** : Generates states conditioned on high loss quantiles via Optimal Transport Conditional Flow Matching (OT-CFM). Pushforward variant multi-step unrolls generated states to anchor long-horizon stability.
+
+---
+
+## 📁 Repository Structure
+
+The codebase is engineered to Google / MIT research standards: lean, modular, typed, and fully reproducible:
+
+```
+ogas_states/
+├── configs/                      # YAML configuration files
+│   ├── phase2_ks_v3.yaml         # Master KS 1D configuration
+│   ├── phase2_burgers.yaml       # Master Burgers 1D configuration
+│   └── phase2_ns2d.yaml          # Master Navier-Stokes 2D configuration
+│
+├── poolbased_surrogate/          # Core minimalist Python package (< 1500 LOC)
+│   ├── config.py                 # Typed configuration dataclasses
+│   ├── pde.py                    # Unified 1D & 2D PDE simulator interface
+│   ├── strategies.py             # Acquisition strategy registry (Uniform, Tube, AL, OGAS)
+│   ├── models/
+│   │   ├── surrogate.py          # ExactAL4PDEUnet1D, ExactAL4PDEUnet2D, EnsembleSurrogate
+│   │   └── ddpm.py               # OT-CFM Flow Matching & Conditional DDPM
+│   ├── train.py                  # Surrogate & generator training loops
+│   ├── eval.py                   # GPU-vectorized evaluation & rollout engine (Zero-Sync)
+│   └── run.py                    # Main Active Learning pipeline orchestrator
+│
+├── scripts/                      # Production SLURM launchers & synthesis tools
+│   ├── launch_full_suite_slurm.sh          # Master KS 1D SLURM suite
+│   ├── launch_burgers_suite_slurm.sh       # Master Burgers 1D SLURM suite
+│   ├── launch_classical_al_ks_slurm.sh     # KS Classical AL baselines
+│   ├── launch_classical_al_burgers_slurm.sh# Burgers Classical AL baselines
+│   ├── launch_2d_kolmogorov_slurm.sh       # 2D Navier-Stokes AL4PDE suite
+│   ├── generate_publication_figures.py     # Master publication figure generator
+│   └── generate_full_picture_report.py     # Consolidated Markdown/JSON report generator
+│
+├── docs/                         # Reports, figures, and technical deep-dives
+│   ├── full_picture_report.md    # Master comprehensive scientific synthesis
+│   ├── round_evolution.md        # Per-round metric evolution & analysis
+│   └── figures/                  # Publication figures (Heatmaps, Rollouts, Spectra)
+│
+├── pyproject.toml                # Package definition
+└── README.md                     # Master documentation (this file)
 ```
 
-Each round owns exactly:
+---
 
-```text
-n_samples = pool.trajectory_steps * pool.n_trajectories
+## ⚡ Quickstart (< 5 minutes)
+
+### 1. Installation
+```bash
+# Clone the repository
+git clone https://github.com/CesarPierr/ogas_states.git
+cd ogas_states
+
+# Create environment with uv or venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
-Round 0:
-
-1. sample `pool.n_trajectories` PDE parameters uniformly
-2. sample `pool.n_trajectories` Fourier initial conditions uniformly
-3. simulate full trajectories with the selected PDE
-4. flatten trajectories into transitions
-5. train the surrogate for `surrogate.epochs_per_round`
-6. compute and store recent per-transition surrogate losses
-7. train DDPM on states using the stored losses
-8. evaluate on Halton validation trajectories
-9. save checkpoint
-
-Rounds `>= 1`:
-
-1. create a new pool from scratch
-2. generate `pool.uniform_fraction` of trajectories with uniform ICs and uniform parameters
-3. generate the remaining states with DDPM
-4. sample fresh PDE parameters for generated states
-5. advance every generated state by one PDE step to get `state_{t+1}`
-6. replace the full previous pool with this new pool
-7. train surrogate, recompute losses, train DDPM, validate, checkpoint
-
-## Sampling Modes
-
-### Uniform Baseline
-
-Config:
-
-```yaml
-pool:
-  uniform_fraction: 1.0
-ddpm:
-  enabled: false
+### 2. Run a Fast Local Smoke Test (1 Round)
+```bash
+python -m poolbased_surrogate.run \
+  --config configs/phase2_ks_v3.yaml \
+  --output ./test_run \
+  --override pool.n_rounds=2 \
+  --override pool.trajectories_per_round=4 \
+  --override pool.steps_per_trajectory=5 \
+  --override surrogate.epochs=2 \
+  --override generator.epochs=2 \
+  --override wandb.enabled=false
 ```
 
-Every round is a fresh uniform trajectory pool.
+---
 
-### Conditional DDPM
+## 🚀 Cluster Deployment on HPC (SLURM / Leonardo Booster)
 
-Config:
-
-```yaml
-pool:
-  uniform_fraction: 0.25
-ddpm:
-  enabled: true
-  mode: conditional_loss
-```
-
-DDPM learns:
-
-```text
-p(state | loss)
-```
-
-Loss proposal currently samples from empirical normalized previous losses plus
-small Gaussian noise. Generated states are then advanced one PDE step.
-
-### Weighted Unconditional DDPM
-
-Config:
-
-```yaml
-ddpm:
-  mode: weighted_unconditional
-```
-
-DDPM learns:
-
-```text
-p(state)
-```
-
-but denoising loss is weighted by:
-
-```text
-0.05 + normalized_transition_loss
-```
-
-This creates a state density biased toward high-loss regions, similar in spirit
-to DAS-PINN style density proportional to residual/loss.
-
-## PDEs
-
-Implemented from scratch in `poolbased_surrogate/pde.py`.
-
-All PDEs are 1D periodic and use spectral derivatives through NumPy FFT.
-
-Available names:
-
-- `burgers`
-- `advection`
-- `diffusion`
-- `ks` or `kuramoto_sivashinsky`
-
-Main PDE config:
-
-```yaml
-pde:
-  name: burgers
-  resolution: 128
-  dt: 0.0005
-  viscosity_range: [0.005, 0.03]
-  velocity_range: [-2.0, 2.0]
-  diffusion_range: [0.002, 0.05]
-  ic:
-    modes: 4
-    amplitude: 1.0
-```
-
-For `burgers`, the parameter is viscosity. For `advection`, velocity. For
-`diffusion`, diffusivity. KS currently uses a dummy scalar parameter to preserve
-the common interface.
-
-## Initial Conditions
-
-Initial conditions are random truncated Fourier series:
-
-```text
-u(x) = sum_m a_m sin(2 pi m x) + b_m cos(2 pi m x)
-```
-
-with coefficients decaying as `1 / m`, then normalized by max absolute value.
-
-Halton validation ICs use the same basis but deterministic low-discrepancy
-coefficients.
-
-## Surrogate Architecture
-
-File:
-
-```text
-poolbased_surrogate/models/surrogate.py
-```
-
-Current model: small ConvUNet-style residual 1D model.
-
-Input:
-
-```text
-state:  [B, 1, X]
-params: [B, 1]
-```
-
-Parameter conditioning is done by expanding the scalar parameter over the spatial
-grid and concatenating it as an input channel:
-
-```text
-[state, parameter_channel] -> Conv1D blocks -> delta_state
-prediction = state + delta_state
-```
-
-Config:
-
-```yaml
-surrogate:
-  model: conv_unet
-  hidden: 48
-  depth: 3
-  ensemble_size: 1
-  epochs_per_round: 5
-  batch_size: 64
-  lr: 0.001
-  weight_decay: 0.0
-```
-
-`ensemble_size > 1` builds several independent models and averages predictions.
-Uncertainty hooks exist through ensemble prediction variance, but the first
-comparison uses loss-based DDPM conditioning.
-
-## DDPM Architecture
-
-File:
-
-```text
-poolbased_surrogate/models/ddpm.py
-```
-
-DDPM is fully convolutional in state dimension.
-
-Input:
-
-```text
-noisy_state: [B, 1, X]
-timestep:    [B]
-loss cond:   [B, 1] optional
-```
-
-Conditioning:
-
-- sinusoidal timestep embedding
-- optional scalar loss appended to embedding
-- MLP maps conditioning to `hidden` channels
-- conditioning channels expanded over spatial dimension
-- concatenated with noisy state
-- Conv1D denoiser predicts noise
-
-Config:
-
-```yaml
-ddpm:
-  enabled: true
-  mode: conditional_loss
-  steps: 32
-  train_epochs: 3
-  batch_size: 64
-  lr: 0.001
-  hidden: 48
-```
-
-Modes:
-
-- `conditional_loss`: condition on normalized loss
-- `weighted_unconditional`: no explicit condition, high-loss states weighted more
-
-## Validation
-
-Validation happens after each round.
-
-Validation data is generated on the fly using Halton sampling:
-
-- Halton PDE parameters
-- Halton Fourier IC coefficients
-- true PDE rollouts
-
-Metrics:
-
-- one-step RMSE mean
-- one-step NRMSE mean
-- RMSE/NRMSE by difficulty quantiles
-- rollout RMSE mean/final
-- rollout NRMSE mean/final
-
-Config:
-
-```yaml
-validation:
-  n_trajectories: 32
-  trajectory_steps: 24
-  quantiles: [0.25, 0.5, 0.75, 0.9]
-  rollout_steps: 24
-```
-
-Difficulty quantile currently uses target energy:
-
-```text
-mean(state_{t+1}^2)
-```
-
-This is simple and stable; replace it if another difficulty score is more useful.
-
-## WandB
-
-Config:
-
-```yaml
-wandb:
-  enabled: true
-  project: poolbased-surrogate-1d
-  group: compare_mixed_conditional
-```
-
-Logged every round:
-
-- `pool/n_samples`
-- `pool/loss_mean`
-- `pool/loss_p90`
-- `train/loss`
-- `ddpm/loss`
-- all validation and rollout metrics
-
-Resume keeps the same WandB run id, so walltime restarts continue the same run.
-
-## Resume
-
-Runs save:
-
-```text
-<output_dir>/checkpoint_latest.pt
-```
-
-after each completed round.
-
-Resume:
+To run large-scale benchmarks on GPU clusters (NVIDIA A100 / Leonardo CINECA):
 
 ```bash
-python -m poolbased_surrogate.run configs/default_1d.yaml --resume
+# Launch KS 1D Master Suite (Pushforward, V3, Ensemble Scaling across 10 seeds)
+sbatch scripts/launch_full_suite_slurm.sh
+
+# Launch Burgers 1D Suite (Uniform, Tube, Sobolev, Spectrum across 10 seeds)
+sbatch scripts/launch_burgers_suite_slurm.sh
+
+# Launch Classical Active Learning Baselines (Top-K / SBAL)
+sbatch scripts/launch_classical_al_ks_slurm.sh
+sbatch scripts/launch_classical_al_burgers_slurm.sh
+
+# Launch 2D Navier-Stokes Kolmogorov Flow Suite
+sbatch scripts/launch_2d_kolmogorov_slurm.sh
 ```
 
-Restored:
+---
 
-- next round index
-- surrogate weights
-- DDPM weights
-- transition pool
-- per-transition losses
-- history
-- NumPy RNG state
-- Torch RNG state
-- CUDA RNG state when available
-- WandB run id
+## 📊 Analysis & Publication Figures
 
-Resume granularity is round-level. If a walltime kills the job mid-round, the
-last completed round is reused.
-
-## Install
-
-Using uv:
+Once runs are complete or in progress, generate all publication figures and quantitative summary tables with a single command:
 
 ```bash
-cd /home/cesarpi-ext/ogas_states
-scripts/install_uv_env.sh
-source /bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
+# Generate all 10 publication figures in docs/figures/
+python scripts/generate_publication_figures.py
+
+# Generate full statistical report in docs/full_picture_report.md
+python scripts/generate_full_picture_report.py
 ```
 
-Default env path:
+### Key Figures Generated:
+- **`fig1_convergence_iso_m.png`** : Sample efficiency and NRMSE convergence across acquisition rounds.
+- **`fig4_rollout_stability.png`** : Autoregressive multi-step rollout RMSE up to 50 steps.
+- **`fig8_multimetric_heatmap_gains.png`** : Master cross-metric heatmap comparing all methods against uniform baseline.
+- **`fig9_rollout_horizon_time_series.png`** : Temporal error trajectory showing long-term stability of generative sampling.
 
-```text
-/bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv
-```
+---
 
-Override:
+## 📚 Key References & Documentation Pointers
 
-```bash
-POOLBASED_ENV=/path/to/env scripts/install_uv_env.sh
-```
-
-## Local Runs
-
-Smoke conditional:
-
-```bash
-python -m poolbased_surrogate.run configs/smoke.yaml
-```
-
-Smoke weighted:
-
-```bash
-python -m poolbased_surrogate.run configs/smoke_weighted.yaml
-```
-
-Run both:
-
-```bash
-scripts/run_smoke.sh
-```
-
-Main comparison:
-
-```bash
-python -m poolbased_surrogate.run configs/compare_uniform.yaml --resume
-python -m poolbased_surrogate.run configs/compare_mixed_conditional.yaml --resume
-```
-
-## Bigfoot GPU
-
-Submit to OAR on Bigfoot. By default this pre-creates or verifies the shared
-validation dataset before submitting, so compared experiments use the same
-validation trajectories.
-
-```bash
-scripts/install_uv_env.sh
-BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_uniform.yaml
-BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
-```
-
-For the Bigfoot devel sandbox, request a MIG partition:
-
-```bash
-BIGFOOT_OAR_TYPE=devel BIGFOOT_WALLTIME=00:30:00 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
-```
-
-The wrapper runs:
-
-```bash
-python -m poolbased_surrogate.run <config> --resume
-```
-
-Logs:
-
-```text
-/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.out
-/bettik/PROJECTS/pr-melissa/cesarpi-ext/poolbased_surrogate_oar/<jobid>.err
-```
-
-## Main Comparison
-
-Question:
-
-```text
-Is mixed uniform + generative state sampling better than uniform-only sampling?
-```
-
-Configs:
-
-- `configs/compare_uniform.yaml`
-- `configs/compare_mixed_conditional.yaml`
-
-Both use same seed and validation. Difference:
-
-```yaml
-# uniform
-pool.uniform_fraction: 1.0
-ddpm.enabled: false
-
-# mixed
-pool.uniform_fraction: 0.25
-ddpm.enabled: true
-ddpm.mode: conditional_loss
-```
-
-Look at:
-
-- `val/nrmse_mean`
-- `rollout/nrmse_final`
-- `pool/loss_p90`
-- convergence per round
-
-## Output Files
-
-Each run directory contains:
-
-```text
-config.resolved.json
-checkpoint_latest.pt
-history.json
-pool_round_<round>.npz
-surrogate.pt
-ddpm.pt
-```
-
-`pool_round_<round>.npz` stores:
-
-- `states`
-- `params`
-- `next_states`
-- `losses`
-
-## Repo Map
-
-```text
-poolbased_surrogate/config.py          dataclass config loader
-poolbased_surrogate/pde.py             1D PDEs and samplers
-poolbased_surrogate/data.py            transition pool datasets
-poolbased_surrogate/models/surrogate.py Conv1D surrogate and ensemble
-poolbased_surrogate/models/ddpm.py      Conv1D DDPM
-poolbased_surrogate/train.py           training helpers
-poolbased_surrogate/eval.py            validation and rollout metrics
-poolbased_surrogate/run.py             experiment entry point
-scripts/install_uv_env.sh              uv env install
-scripts/submit_bigfoot.sh              Bigfoot OAR GPU submit
-scripts/submit_kraken_devel.sh         legacy Kraken OAR devel submit
-```
-
-## Design Choices
-
-Code is experimental, not production:
-
-- simple YAML config
-- no registry framework
-- no plugin system
-- no distributed training
-- no multiprocessing
-- no external dataset format
-- round-level checkpointing only
-
-This should keep modifications cheap while making the active sampling idea easy
-to inspect.
+- **Full Scientific Report** : [`docs/full_picture_report.md`](file:///leonardo/home/userexternal/pcesar00/ogas_states/docs/full_picture_report.md)
+- **Round-by-Round Evolution** : [`docs/round_evolution.md`](file:///leonardo/home/userexternal/pcesar00/ogas_states/docs/round_evolution.md)
+- **Convergence Efficiency Guide** : [`docs/convergence_efficiency.md`](file:///leonardo/home/userexternal/pcesar00/ogas_states/docs/convergence_efficiency.md)
+- **HPC & Cluster Setup Guide** : [`LEONARDO.md`](file:///leonardo/home/userexternal/pcesar00/ogas_states/LEONARDO.md)
