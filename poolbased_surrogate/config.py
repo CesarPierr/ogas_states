@@ -39,6 +39,9 @@ class PoolConfig:
     tube_rho_min: float = 0.05   # random_tube: relative perturbation radius range
     tube_rho_max: float = 0.5
     tube_kmax: int = 12          # random_tube: highest perturbed wavenumber
+    # Classical Active Learning Baselines (Top-K / SBAL on dynamic candidate pool):
+    classic_al_oversample: int = 10   # candidate pool oversampling factor (10x active volume)
+    sbal_alpha: float = 1.0           # power exponent for SBAL stochastic sampling probabilities
 
 
 @dataclass
@@ -69,6 +72,11 @@ class SurrogateConfig:
     # intermittent bad-training-round collapse seen in gen_v3 (seed 303 r9: bulk
     # x17 in one round while r8 was its best).
     degradation_guard: float = 0.0
+    sobolev_weight: float = 0.0
+    # Pushforward multi-step rollout regularization: predict extra steps from detached
+    # predictions to enforce rollout stability and prevent non-linear energy blow-ups.
+    pushforward_steps: int = 0
+    pushforward_weight: float = 0.5
 
 
 @dataclass

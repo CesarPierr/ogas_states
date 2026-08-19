@@ -263,6 +263,8 @@ def main(argv: list[str] | None = None) -> None:
                 edit_t0=cfg.ddpm.edit_t0,
                 candidate_factor=cfg.ddpm.candidate_factor,
                 realism_tv_gate=cfg.ddpm.realism_tv_gate,
+                classic_al_oversample=getattr(cfg.pool, "classic_al_oversample", 10),
+                sbal_alpha=getattr(cfg.pool, "sbal_alpha", 1.0),
             )
             finish_phase("make_pool", phase_start)
         else:
@@ -301,6 +303,9 @@ def main(argv: list[str] | None = None) -> None:
             ensemble_bootstrap=cfg.surrogate.ensemble_bootstrap,
             input_noise_std=cfg.surrogate.input_noise_std,
             loss_weighted_replay=cfg.surrogate.loss_weighted_replay,
+            sobolev_weight=cfg.surrogate.sobolev_weight,
+            pushforward_steps=getattr(cfg.surrogate, "pushforward_steps", 0),
+            pushforward_weight=getattr(cfg.surrogate, "pushforward_weight", 0.5),
         )
         finish_phase("surrogate_train", phase_start)
         ddpm_metrics = {}

@@ -185,7 +185,7 @@ def batched_predict(
     states: np.ndarray,
     params: np.ndarray,
     device: torch.device,
-    batch_size: int = 256,
+    batch_size: int = 1024,
 ) -> np.ndarray:
     model.eval()
     out = []
@@ -224,22 +224,41 @@ def rollout_error_series(
     steps: int,
     device: torch.device,
     n_trajectories: int = 256,
+    batch_size: int = 512,
 ) -> dict[str, np.ndarray]:
     n = min(n_trajectories, validation.n_trajectories)
     idx = np.linspace(0, validation.n_trajectories - 1, n, dtype=np.int64)
     states0 = validation.states0[idx]
     params = validation.params[idx]
-    target = validation.trajectories[idx, 1 : steps + 1]
-    state = torch.from_numpy(states0).to(device)
-    par = torch.from_numpy(params).to(device)
-    preds = []
+    target_all = validation.trajectories[idx, 1 : steps + 1]
+    
+    per_traj_rmse_list = []
+    per_traj_nrmse_list = []
     model.eval()
-    for _ in range(steps):
-        state = model(state, par)
-        preds.append(state.cpu().numpy())
-    rollout = np.stack(preds, axis=1)
-    rmse = np.sqrt(np.mean((rollout - target) ** 2, axis=(2, 3)))
-    nrmse = rmse / (np.sqrt(np.mean(target**2, axis=(2, 3))) + 1e-8)
+    
+    for i in range(0, n, batch_size):
+        end = min(i + batch_size, n)
+        st = torch.from_numpy(states0[i:end]).to(device)
+        pm = torch.from_numpy(params[i:end]).to(device)
+        tgt = torch.from_numpy(target_all[i:end]).to(device)
+        
+        preds_gpu = torch.empty((len(st), steps, *st.shape[1:]), device=device)
+        curr = st
+        for t in range(steps):
+            curr = model(curr, pm)
+            preds_gpu[:, t] = curr
+            
+        diff_sq = (preds_gpu - tgt) ** 2
+        dims = tuple(range(2, diff_sq.ndim))
+        rmse_b_t = torch.sqrt(torch.mean(diff_sq, dim=dims))
+        denom_b_t = torch.sqrt(torch.mean(tgt**2, dim=dims)) + 1e-8
+        nrmse_b_t = rmse_b_t / denom_b_t
+        
+        per_traj_rmse_list.append(rmse_b_t.cpu().numpy())
+        per_traj_nrmse_list.append(nrmse_b_t.cpu().numpy())
+        
+    rmse = np.concatenate(per_traj_rmse_list, axis=0)
+    nrmse = np.concatenate(per_traj_nrmse_list, axis=0)
     return {
         "step": np.arange(1, steps + 1),
         "rmse_mean": rmse.mean(axis=0),
@@ -262,9 +281,6 @@ def rollout_spacetime_examples(
 ) -> dict[str, np.ndarray]:
     n = min(n_examples, validation.n_trajectories)
     if hard:
-        # Model-independent difficulty so the SAME example set is shown every round and
-        # every run (comparable figures): rank by mean spatial total-variation of the
-        # ground-truth trajectory over the rollout horizon. Higher TV = rougher = harder.
         gt = validation.trajectories[:, : steps + 1, 0]  # (N, T+1, L)
         gt_tv = np.abs(np.diff(gt, axis=-1)).sum(axis=-1).mean(axis=1)  # (N,)
         idx = np.sort(np.argsort(gt_tv)[-n:])
@@ -273,14 +289,18 @@ def rollout_spacetime_examples(
     states0 = validation.states0[idx]
     params = validation.params[idx]
     truth = validation.trajectories[idx, : steps + 1, 0]
-    state = torch.from_numpy(states0).to(device)
-    par = torch.from_numpy(params).to(device)
-    preds = [states0]
+    st = torch.from_numpy(states0).to(device)
+    pm = torch.from_numpy(params).to(device)
+    
+    preds_gpu = torch.empty((n, steps + 1, *st.shape[1:]), device=device)
+    preds_gpu[:, 0] = st
+    curr = st
     model.eval()
-    for _ in range(steps):
-        state = model(state, par)
-        preds.append(state.cpu().numpy())
-    pred = np.concatenate(preds, axis=1)
+    for t in range(1, steps + 1):
+        curr = model(curr, pm)
+        preds_gpu[:, t] = curr
+        
+    pred = preds_gpu[:, :, 0].cpu().numpy()
     return {
         "truth": np.transpose(truth, (0, 2, 1)),
         "prediction": np.transpose(pred, (0, 2, 1)),
@@ -309,20 +329,42 @@ def rollout_metrics_from_truth(
     truth: np.ndarray,
     steps: int,
     device: torch.device,
+    batch_size: int = 512,
 ) -> dict[str, float]:
-    state = torch.from_numpy(states0).to(device)
-    par = torch.from_numpy(params).to(device)
-    preds = []
     model.eval()
-    for _ in range(steps):
-        state = model(state, par)
-        preds.append(state.cpu().numpy())
-    rollout = np.stack(preds, axis=1)
-    target = truth[:, 1 : steps + 1]
-    per_traj_rmse_t = np.sqrt(np.mean((rollout - target) ** 2, axis=(2, 3)))
-    per_traj_nrmse_t = per_traj_rmse_t / (np.sqrt(np.mean(target**2, axis=(2, 3))) + 1e-8)
-    rmse_t = np.sqrt(np.mean((rollout - target) ** 2, axis=(0, 2, 3)))
-    nrmse_t = rmse_t / (np.sqrt(np.mean(target**2, axis=(0, 2, 3))) + 1e-8)
+    n_traj = states0.shape[0]
+    target_all = truth[:, 1 : steps + 1]
+    
+    per_traj_rmse_list = []
+    per_traj_nrmse_list = []
+    
+    for i in range(0, n_traj, batch_size):
+        end = min(i + batch_size, n_traj)
+        st = torch.from_numpy(states0[i:end]).to(device)
+        pm = torch.from_numpy(params[i:end]).to(device)
+        tgt = torch.from_numpy(target_all[i:end]).to(device)
+        
+        preds_gpu = torch.empty((len(st), steps, *st.shape[1:]), device=device)
+        curr = st
+        for t in range(steps):
+            curr = model(curr, pm)
+            preds_gpu[:, t] = curr
+            
+        diff_sq = (preds_gpu - tgt) ** 2
+        dims = tuple(range(2, diff_sq.ndim))
+        rmse_b_t = torch.sqrt(torch.mean(diff_sq, dim=dims))
+        denom_b_t = torch.sqrt(torch.mean(tgt**2, dim=dims)) + 1e-8
+        nrmse_b_t = rmse_b_t / denom_b_t
+        
+        per_traj_rmse_list.append(rmse_b_t.cpu().numpy())
+        per_traj_nrmse_list.append(nrmse_b_t.cpu().numpy())
+        
+    per_traj_rmse_t = np.concatenate(per_traj_rmse_list, axis=0)
+    per_traj_nrmse_t = np.concatenate(per_traj_nrmse_list, axis=0)
+    
+    rmse_t = np.mean(per_traj_rmse_t, axis=0)
+    nrmse_t = np.mean(per_traj_nrmse_t, axis=0)
+    
     metrics = {
         "rollout/rmse_final": float(rmse_t[-1]),
         "rollout/rmse_mean": float(rmse_t.mean()),

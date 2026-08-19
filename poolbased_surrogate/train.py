@@ -101,6 +101,9 @@ def train_surrogate(
     ensemble_bootstrap: bool = True,
     input_noise_std: float = 0.0,
     loss_weighted_replay: bool = False,
+    sobolev_weight: float = 0.0,
+    pushforward_steps: int = 0,
+    pushforward_weight: float = 0.5,
 ) -> dict[str, float]:
     if seed is not None:
         torch.manual_seed(seed)
@@ -137,6 +140,27 @@ def train_surrogate(
                 opt.zero_grad(set_to_none=True)
                 pred = model_i(state, params)
                 loss = torch.mean((pred - target) ** 2)
+                if sobolev_weight > 0:
+                    d_pred = pred[:, :, 1:] - pred[:, :, :-1]
+                    d_target = target[:, :, 1:] - target[:, :, :-1]
+                    loss = loss + float(sobolev_weight) * torch.mean((d_pred - d_target) ** 2)
+                if pushforward_steps > 0:
+                    # Pushforward autoregressive unroll from detached 1-step prediction.
+                    # Penalizes high-frequency non-linear gradient blowup and unphysical energy drift
+                    # when the surrogate feeds its own outputs back as inputs (Brandstetter et al., 2022).
+                    pf_state = pred.detach()
+                    target_var = torch.mean(target ** 2, dim=-1, keepdim=True) + 1e-6
+                    for _ in range(pushforward_steps):
+                        pf_pred = model_i(pf_state, params)
+                        d_pf = pf_pred[:, :, 1:] - pf_pred[:, :, :-1]
+                        pf_sobolev = torch.mean(d_pf ** 2)
+                        pf_var = torch.mean(pf_pred ** 2, dim=-1, keepdim=True)
+                        pf_energy_drift = torch.mean(torch.clamp(pf_var / target_var - 1.5, min=0.0) ** 2)
+                        pf_delta = torch.mean((pf_pred - pf_state) ** 2)
+                        
+                        pf_loss = float(pushforward_weight) * (0.05 * pf_sobolev + pf_energy_drift + 0.02 * pf_delta)
+                        loss = loss + pf_loss
+                        pf_state = pf_pred.detach()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model_i.parameters(), 1.0)
                 opt.step()
