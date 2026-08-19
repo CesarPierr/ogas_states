@@ -15,6 +15,8 @@ set -euo pipefail
 cd /leonardo/home/userexternal/pcesar00/ogas_states
 source .venv/bin/activate
 
+export PYTHONPATH=/leonardo_scratch/fast/EUHPC_D36_033/ogas_external/al4pde:/leonardo_scratch/fast/EUHPC_D36_033/ogas_external/pdearena:/leonardo_scratch/fast/EUHPC_D36_033/ogas_external/jax-cfd:.
+
 mkdir -p results/json
 
 echo "=== STARTING MASTER POST-HOC EVALUATION ON GPU ==="
