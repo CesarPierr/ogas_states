@@ -20,7 +20,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from poolbased_surrogate.pde2d import PDE2D, ExactAL4PDEUnet2D
+from poolbased_surrogate.pde import PDE
+from poolbased_surrogate.models.surrogate import ExactAL4PDEUnet2D
+from poolbased_surrogate.config import PDEConfig
+
+def PDE2D(resolution=128, dt=0.05):
+    return PDE(PDEConfig(name='ns2d', resolution=resolution, dt=dt))
+
 
 # -------------------------------------------------------------
 # 1. 2D STREAMFUNCTION FLOW MATCHING GENERATOR
