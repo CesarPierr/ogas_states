@@ -1,54 +1,107 @@
-# 04. Benchmarks, PDE Solvers & Evaluation Protocol
+# 04. Benchmarks, PDE Solvers & Multi-Bank Evaluation Protocol
 
-This document details the equations, numerical solvers, parameter ranges, and standardized evaluation test banks used throughout the OGAS benchmark suite.
+This document provides complete physical descriptions, mathematical equations, parameter domains, and verification test banks used across the **OGAS** benchmark suite.
 
 ---
 
-## 1. Supported PDEs & Numerical Solvers
+## 1. Physical Systems & PDE Solvers
 
-### A. 1D Kuramoto-Sivashinsky (KS)
-- **Mathematical Form**:
-  $$\partial_t u + u \partial_x u + \alpha \partial_x^2 u + \beta \partial_x^4 u = 0, \quad x \in [0, 32], \; t \ge 0$$
-- **Physics**: Models flame front instability, fluid film dynamics, and chaotic spatiotemporal turbulence.
-- **Parameters**: Domain length $L \in [0.5, 4.0]$, non-linear scale $\nu \in [0.1, 100.0]$.
-- **Solver**: Native AL4PDE `ParametricKSJaxSim` (pseudo-spectral integration via JAX with anti-aliasing).
-- **Discretization**: $N=128$, $\Delta t = 0.05$.
+### A. 1D Kuramoto-Sivashinsky (KS) Equation
+The Kuramoto-Sivashinsky equation is a canonical non-linear dissipative PDE modeling chaotic spatiotemporal turbulence, flame front flutter, and falling liquid films:
+
+$$\frac{\partial u}{\partial t} + u \frac{\partial u}{\partial x} + \alpha \frac{\partial^2 u}{\partial x^2} + \beta \frac{\partial^4 u}{\partial x^4} = 0, \quad x \in [0, 32], \; t \ge 0$$
+
+- **Physical Roles of Terms**:
+  - $u \partial_x u$: Non-linear convective energy transfer across spatial scales.
+  - $\alpha \partial_x^2 u$: Negative diffusion (energy production at large wavelengths / instability).
+  - $\beta \partial_x^4 u$: Fourth-order hyper-viscous dissipation (energy damping at small wavelengths).
+- **Chaos & Attractor Dynamics**: The system possesses positive Lyapunov exponents, exhibiting sensitive dependence on initial conditions and a chaotic strange attractor with complex spatio-temporal cell dynamics.
+- **Discretization & Solver**:
+  - Resolution: $N = 128$ grid points.
+  - Solver: Native AL4PDE `ParametricKSJaxSim` (pseudo-spectral Fourier integration with 2/3 de-aliasing rule).
+  - Time-step: $\Delta t = 0.05$.
+  - Parameter Range: Domain length scale $L \in [0.5, 4.0]$, non-linear scale $\nu \in [0.1, 100.0]$.
+
+---
 
 ### B. 1D Viscous Burgers Equation
-- **Mathematical Form**:
-  $$\partial_t u + u \partial_x u - \nu \partial_x^2 u = 0, \quad x \in [0, 1], \; t \ge 0$$
-- **Physics**: Canonical model for non-linear advection, shock steepening, and viscous dissipation.
-- **Parameters**: Viscosity $\nu \in [10^{-3}, 10^{-1}]$ (log-scale sampled).
-- **Solver**: Native AL4PDE `BurgersSim` (2nd-order Godunov flux limiter).
-- **Discretization**: $N=128$, $\Delta t = 0.05$.
+The Viscous Burgers equation is a fundamental non-linear conservation law modeling shock wave development, acoustic turbulence, and gas dynamics:
+
+$$\frac{\partial u}{\partial t} + u \frac{\partial u}{\partial x} - \nu \frac{\partial^2 u}{\partial x^2} = 0, \quad x \in [0, 1], \; t \ge 0$$
+
+- **Physical Roles of Terms**:
+  - $u \partial_x u$: Non-linear self-advection causing wave steepening and shock formation.
+  - $\nu \partial_x^2 u$: Physical viscosity smoothing steep gradients and dissipating shock energy.
+- **Discretization & Solver**:
+  - Resolution: $N = 128$ grid points.
+  - Solver: Native AL4PDE `BurgersSim` (2nd-order Godunov finite volume solver with Van Leer flux limiter).
+  - Time-step: $\Delta t = 0.05$.
+  - Parameter Range: Kinematic viscosity $\nu \in [10^{-3}, 10^{-1}]$ sampled in logarithmic space.
+
+---
 
 ### C. 2D Incompressible Navier-Stokes (Kolmogorov Flow)
-- **Mathematical Form**:
-  $$\partial_t \mathbf{u} + (\mathbf{u} \cdot \nabla)\mathbf{u} = -\frac{1}{\rho}\nabla p + \nu \nabla^2 \mathbf{u} + \mathbf{f}, \quad \nabla \cdot \mathbf{u} = 0$$
-- **Physics**: 2D turbulent vortex interactions driven by sinusoidal Kolmogorov forcing $\mathbf{f} = \sin(k y)\hat{\mathbf{x}}$.
-- **Parameters**: Viscosities $\eta, \zeta \in [10^{-4}, 10^{-1}]$ (log-scale sampled).
-- **Solver**: Native AL4PDE / PDEBench `CFDSim` (high-order Riemann HLL/HLLC Godunov solver in JAX).
-- **Discretization**: Resolution $128 \times 128$, 2-channel velocity $(v_x, v_y)$, $\Delta t = 0.05$.
+The 2D Navier-Stokes equations under sinusoidal Kolmogorov forcing describe 2D turbulent vortex decay and energy cascade:
+
+$$\frac{\partial \mathbf{u}}{\partial t} + (\mathbf{u} \cdot \nabla)\mathbf{u} = -\frac{1}{\rho}\nabla p + \nu \nabla^2 \mathbf{u} + \mathbf{f}, \quad \nabla \cdot \mathbf{u} = 0$$
+
+where $\mathbf{f}(x, y) = \sin(k y) \hat{\mathbf{x}}$ is the external Kolmogorov force driving the flow.
+- **Physical Roles of Terms**:
+  - $(\mathbf{u} \cdot \nabla)\mathbf{u}$: Non-linear vortex stretching and advection.
+  - $\nu \nabla^2 \mathbf{u}$: Viscous vortex dissipation.
+  - $\mathbf{f}$: Energy injection maintaining chaotic vortex shedding.
+- **Discretization & Solver**:
+  - Resolution: $128 \times 128$ spatial grid.
+  - Channels: 2-channel velocity field $\mathbf{u} = (v_x, v_y)$.
+  - Solver: AL4PDE / PDEBench `CFDSim` (Riemann HLL/HLLC Godunov solver implemented in JAX-CFD).
+  - Time-step: $\Delta t = 0.05$.
+  - Parameter Range: Shear and bulk viscosities $\eta, \zeta \in [10^{-4}, 10^{-1}]$ sampled in logarithmic space.
 
 ---
 
-## 2. Standardized Multi-Bank Evaluation Protocol
+## 2. Multi-Bank Evaluation Test Suites
 
-To rigorously quantify surrogate performance without attractor overfitting, models are evaluated across **4 standardized test banks**:
+Evaluating surrogates only on random attractor trajectories creates an illusion of generalization. To rigorously assess surrogate performance, OGAS benchmarks every model across **4 standardized, fixed test banks**:
 
-| Test Bank | Generation Mechanism | Purpose |
-|---|---|---|
-| **1. Attractor Validation** | 16 seeded trajectories $\times$ 50 steps from standard attractor ICs. | Baseline in-distribution accuracy. |
-| **2. Hard Low-Amplitude** | Initial conditions scaled below attractor energy floor ($E < E_{\text{attractor}}$). | Tests linear growth and recovery towards the attractor. |
-| **3. Hard Total Variation (High TV)** | Initial conditions with injected high-frequency Fourier modes. | Tests surrogate resistance to non-physical high-frequency blowup. |
-| **4. Perturbation Tubes** | Ground-truth trajectories perturbed by smooth spectral envelopes ($\rho \in [0.1, 0.5]$). | Directly measures off-manifold self-correcting stability. |
+```
+                       ┌────────────────────────────────────────────────────────┐
+                       │               STANDARDIZED TEST SUITES                 │
+                       └────────────────────────────────────────────────────────┘
+                                                    │
+         ┌───────────────────┬──────────────────────┴──────────────────────┬───────────────────┐
+         ▼                   ▼                                             ▼                   ▼
+  [ Bank 1: Attractor ] [ Bank 2: Low-Amp ]                         [ Bank 3: High TV ]  [ Bank 4: Tubes ]
+  16 In-Dist Trajs      Energy < E_attractor                        Injected High Modes   Off-Manifold Shocks
+  (Attractor Accuracy)  (Linear Recovery)                           (High-Freq Stability)(Self-Correction)
+```
+
+### Bank 1: Attractor In-Distribution Validation
+- **Protocol**: 16 fixed trajectories $\times$ 50 steps initialized from standard random Fourier modes.
+- **Purpose**: Quantifies standard in-distribution surrogate accuracy on the unperturbed physical manifold.
+
+### Bank 2: Hard Low-Amplitude (Out-of-Distribution)
+- **Protocol**: 16 fixed trajectories initialized with energy scaled below the attractor floor ($E < 0.1 \cdot E_{\text{attractor}}$).
+- **Purpose**: Tests whether the surrogate can accurately capture linear growth regimes and recover the non-linear attractor from non-equilibrium states.
+
+### Bank 3: Hard High Total Variation (High TV)
+- **Protocol**: 16 fixed trajectories initialized with high-frequency spatial modes.
+- **Purpose**: Tests surrogate resistance against high-frequency numerical blowup and unphysical oscillations.
+
+### Bank 4: Perturbation Tubes ($\rho \in [0.1, 0.5]$)
+- **Protocol**: Ground-truth attractor trajectories perturbed by smooth spectral noise envelopes with relative amplitude $\rho$.
+- **Purpose**: Directly evaluates the surrogate's off-manifold **contractive restoring force**—the core capability unlocked by OGAS.
 
 ---
 
-## 3. Standard Metrics Computed
+## 3. Quantitative Metrics Computed
 
-All evaluations compute:
-- **1-step & Multi-step NRMSE**: Normalized Root Mean Squared Error $\frac{\| \hat{u} - u \|_2}{\| u \|_2}$.
-- **RMSE**: Absolute Root Mean Squared Error.
-- **Max Error ($L_\infty$)**: Peak point-wise discrepancy.
-- **Spectral Error**: Fourier power spectrum divergence across spatial wavenumbers $k$.
+Across all test banks, evaluations record:
+1. **Normalized Root Mean Squared Error (NRMSE)**:
+   $$\text{NRMSE}(t) = \frac{\| \hat{u}(t) - u(t) \|_{L^2}}{\| u(t) \|_{L^2}}$$
+2. **Mean Multi-Step Rollout Error**:
+   $$\text{Mean Rollout RMSE} = \frac{1}{K} \sum_{k=1}^K \| \hat{u}_k - u_k \|_{L^2}$$
+3. **Peak Pointwise Error ($L_\infty$)**:
+   $$\text{Max Error} = \max_{x \in \Omega} |\hat{u}(x, t) - u(x, t)|$$
+4. **Spectral Divergence**:
+   $$\Delta E(k) = |\mathcal{F}[\hat{u}](k)|^2 - |\mathcal{F}[u](k)|^2$$
+   measuring energy conservation across spatial frequencies $k$.

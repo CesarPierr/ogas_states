@@ -1,68 +1,123 @@
 # 03. Codebase Architecture & Developer Guide
 
-This document explains the architecture of the **`poolbased_surrogate`** package, tensor conventions, design decisions, and extension points.
+This document provides a deep architectural walkthrough of the **`poolbased_surrogate`** package, illustrating the complete dataflow through an active learning round, tensor conventions, and design patterns.
 
 ---
 
-## 1. Package Organization
+## 1. High-Level Package Architecture
 
-The core package is structured into clean, decoupled modules adhering to Google/MIT research standards:
+The codebase is organized into modular, decoupled components adhering to Google and MIT research engineering best practices:
 
 ```
-poolbased_surrogate/
-├── config.py         # Strongly-typed configuration dataclasses
-├── pde.py            # Unified 1D & 2D PDE engine (AL4PDE bridge)
-├── strategies.py     # Unified active learning acquisition strategies
-├── models/
-│   ├── surrogate.py  # ExactAL4PDEUnet1D, ExactAL4PDEUnet2D, EnsembleSurrogate
-│   └── ddpm.py       # Conditional OT-CFM Flow Matching & DDPM
-├── train.py          # Training loops for surrogate & generative models
-├── eval.py           # GPU-vectorized rollout and evaluation suite (Zero CPU Sync)
-├── pool.py           # Pool transition dataset management facade
-└── run.py            # Orchestrator of the active learning loop
+                            ┌────────────────────────────────────────────────────────┐
+                            │                  EXPERIMENT PIPELINE                   │
+                            │                   (run.py orchestrator)                │
+                            └────────────────────────────────────────────────────────┘
+                                                         │
+         ┌───────────────────────┬───────────────────────┼───────────────────────┬───────────────────────┐
+         ▼                       ▼                       ▼                       ▼                       ▼
+   [ config.py ]            [ pde.py ]            [ strategies.py ]        [ models/ ]             [ eval.py ]
+ Typed Dataclasses       Unified PDE Simulator   Acquisition Registry   Surrogates & Gen      100% GPU Rollouts
+ (PDE, Pool, Train)      (1D KS, Burgers, NS2D)  (Uniform, Tube, AL)    (Exact Unet1D/2D)     (Zero-Sync VRAM)
 ```
 
 ---
 
-## 2. Tensor Shape Conventions
+## 2. Step-by-Step Anatomy of an Active Learning Round
 
-All tensors across the codebase adhere to strict shape conventions:
+An entire active learning experiment proceeds in discrete rounds $r = 0, \dots, R_{\max}$. Here is the precise sequence of operations executed during each round:
 
-| Domain | Spatial Dim | Initial State $u_0$ | Trajectory Tensor | Physical Params $\mu$ |
-|---|---|---|---|---|
-| **1D PDEs** (KS, Burgers) | $1\text{D}$ ($N=128$) | `[B, 1, N]` | `[B, steps+1, 1, N]` | `[B, P]` |
-| **2D PDEs** (Navier-Stokes) | $2\text{D}$ ($128 \times 128$) | `[B, 2, H, W]` (vx, vy) | `[B, steps+1, 2, H, W]` | `[B, P]` |
-
-All arrays in NumPy are `float32`, and all PyTorch models operate on `torch.float32` tensors on `device="cuda"`.
+```
+                        ROUND r = 0 (Initialization)
+                        ═════════════════════════════
+                        1. Sample initial conditions u_0 and parameters \mu uniformly.
+                        2. Simulate full solver trajectories -> flatten to transitions (u_t, \mu, u_{t+1}).
+                        3. Train Surrogate Model \mathcal{S}_\theta on \mathcal{D}^{(0)}.
+                        4. Evaluate on fixed 4-bank test suite (Attractor, Hard Low-Amp, Hard TV, Tube).
+                        5. Compute per-transition surrogate losses \ell_i.
+                        6. Train Conditional Generator p_\phi(u | c) on (u_i, c_i).
+                                     │
+                                     ▼
+                        ROUND r >= 1 (Active Cycle)
+                        ═══════════════════════════
+                        1. Strategy Acquisition (strategies.py):
+                           - 50% Uniform Trajectories from Solver.
+                           - 50% Generative Proposal from Flow Matching / Classical AL.
+                        2. Query Solver: advance proposed states by 1 step: u_{t+1} = \Psi_{\Delta t}(u_t).
+                        3. Merge into Active Pool: \mathcal{D}^{(r)} = \mathcal{D}^{(r-1)} \cup \mathcal{D}_{\text{new}}.
+                        4. Re-train Surrogate Ensemble \mathcal{S}_\theta on \mathcal{D}^{(r)}.
+                        5. Re-evaluate on fixed 4-bank test suite.
+                        6. Update per-transition losses & re-train Generator p_\phi.
+                        7. Save checkpoint (weights, history.json, pool_round_r.npz).
+```
 
 ---
 
-## 3. Key Modules & Design Roles
+## 3. Core Modules Deep Dive
 
-### A. [`poolbased_surrogate/pde.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/pde.py)
-Provides a unified simulator interface:
+### A. [`poolbased_surrogate/config.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/config.py)
+Uses Python dataclasses with full type annotations to validate configurations from YAML:
+- `PDEConfig`: PDE name (`ks`, `burgers`, `ns2d`), spatial resolution $N$, time-step $\Delta t$, physical parameter ranges, initial condition spectrum.
+- `PoolConfig`: Trajectories per round, steps per trajectory, sampling strategy variant (`uniform_baseline`, `heuristic_tube`, `classic_al_topk`, `classic_al_sbal`, `ogas_generative`).
+- `SurrogateConfig`: Model architecture (`al4pde_unet1d`, `al4pde_unet2d`), hidden channel width, depth, ensemble size $M$, training epochs, learning rate.
+- `GeneratorConfig`: Model type (`flow_matching`, `ddpm`), quantile proposal distributions, conditioning modes.
+
+---
+
+### B. [`poolbased_surrogate/pde.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/pde.py)
+The unified physical simulation engine bridging 1D and 2D solvers with zero boilerplate:
 ```python
-pde = PDE(cfg.pde)
-params = pde.sample_params(n, seed)          # [n, P]
-states = pde.sample_ic(n, seed)              # [n, C, N] or [n, 2, H, W]
-trajs  = pde.simulate(states, params, steps) # [n, steps+1, C, N]
-next_u = pde.step(states, params)            # [n, C, N]
+class PDE:
+    def __init__(self, cfg: PDEConfig):
+        # Automatically detects spatial_dim and initializes AL4PDE/JAX backend
+        ...
+    
+    def sample_params(self, n: int, seed: int) -> np.ndarray:
+        """Sample physical PDE parameters (viscosity, domain length) -> [n, P]"""
+        
+    def sample_ic(self, n: int, seed: int) -> np.ndarray:
+        """Sample physical initial conditions -> [n, C, N] (1D) or [n, 2, H, W] (2D)"""
+        
+    def simulate(self, states: np.ndarray, params: np.ndarray, steps: int) -> np.ndarray:
+        """Simulate multi-step trajectories -> [n, steps+1, C, N]"""
+        
+    def step(self, states: np.ndarray, params: np.ndarray) -> np.ndarray:
+        """Advance single-step transitions -> [n, C, N]"""
 ```
 
-### B. [`poolbased_surrogate/strategies.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/strategies.py)
-Implements the Strategy Pattern for data acquisition:
-- `UniformStrategy`: Standard uniform attractor sampling.
-- `HeuristicTubeStrategy`: Perturbed spectral noise around attractor.
-- `ClassicalALStrategy`: $10\times$ candidate oversampling + Top-K / SBAL selection.
-- `GenerativeStrategy`: Conditional Flow Matching proposal.
+---
 
-### C. [`poolbased_surrogate/models/surrogate.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/models/surrogate.py)
-Implements exact conditional U-Nets matching the AL4PDE benchmark:
-- `ExactAL4PDEUnet1D`: 1D conditioned U-Net with circular padding and difference residual scaling.
-- `ExactAL4PDEUnet2D`: 2D conditioned U-Net for velocity fields.
-- `EnsembleSurrogate`: Vectorized ensemble wrapper with `.uncertainty(state, params)` method.
+### C. [`poolbased_surrogate/strategies.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/strategies.py)
+Implements the Strategy Pattern for clean, decoupled data acquisition:
+- `UniformStrategy`: Generates 100% full solver trajectories from uniform random initial conditions.
+- `HeuristicTubeStrategy`: Applies calibrated smooth spectral noise envelopes around existing attractor trajectories to probe the local recovery basin.
+- `ClassicalALStrategy`: Generates $10\times$ candidate trajectories from the solver, scores them via Ensemble Variance ($M \ge 3$) or Residual Loss ($M=1$), and performs Top-K or SBAL selection.
+- `GenerativeStrategy`: Uses the trained OT-CFM Flow Matching generator to synthesize off-attractor boundary states conditioned on high loss quantiles, stepping each state once with the solver.
 
-### D. [`poolbased_surrogate/eval.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/eval.py)
+---
+
+### D. [`poolbased_surrogate/models/surrogate.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/models/surrogate.py)
+Provides native neural operator architectures with exact parity to the AL4PDE benchmark:
+- `ExactAL4PDEUnet1D`: 1D Conditioned U-Net with circular boundary padding and residual scaling.
+- `ExactAL4PDEUnet2D`: 2D Conditioned U-Net operating on 2-channel velocity fields $(v_x, v_y)$.
+- `EnsembleSurrogate`: Wraps an ensemble of $M$ models, computing forward predictions $\bar{\mathcal{S}}(u, \mu)$ and vectorized epistemic uncertainty $\sigma^2(u, \mu)$ across the ensemble.
+
+---
+
+### E. [`poolbased_surrogate/eval.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/eval.py)
 High-performance evaluation engine:
-- **Zero-Sync GPU Rollouts**: Multi-step autoregressive rollouts remain 100% on VRAM without CPU synchronization barriers.
+- **Zero-Sync GPU Vectorization**: Multi-step autoregressive rollouts are executed entirely inside GPU VRAM, eliminating CPU-GPU memory transfer bottlenecks.
 - **Multi-Metric Suite**: Computes NRMSE, RMSE, Max-Error, and Spectral Energy spectra across all test banks.
+
+---
+
+## 4. Tensor Shape Contracts
+
+| Tensor Type | 1D Physics (KS, Burgers) | 2D Physics (Navier-Stokes) |
+|---|---|---|
+| **State Tensor** $u$ | `[B, 1, 128]` | `[B, 2, 128, 128]` (vx, vy) |
+| **Parameter Tensor** $\mu$ | `[B, 1]` or `[B, 2]` | `[B, 2]` $(\eta, \zeta)$ |
+| **Trajectory Tensor** | `[B, steps+1, 1, 128]` | `[B, steps+1, 2, 128, 128]` |
+| **Quantile Condition** $c$ | `[B, 1]` | `[B, 1]` |
+| **Ensemble Prediction** | `[B, 1, 128]` | `[B, 2, 128, 128]` |
+| **Ensemble Variance** | `[B]` | `[B]` |
