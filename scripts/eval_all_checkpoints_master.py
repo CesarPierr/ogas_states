@@ -38,8 +38,9 @@ from poolbased_surrogate.models.surrogate import (
     ExactAL4PDEUnet1D,
     build_surrogate,
 )
-from poolbased_surrogate.pde import PDE
+from poolbased_surrogate.pde import PDE, ensure_al4pde_paths
 
+ensure_al4pde_paths()
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 VAL_ROOT = Path("/leonardo_scratch/fast/EUHPC_D36_033/ogas_validation")
