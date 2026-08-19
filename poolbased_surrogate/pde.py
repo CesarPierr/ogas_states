@@ -290,16 +290,13 @@ class PDE:
             
             gen = self._ic_generator()
             grid_2d = gen.get_grid(B)
-            dx = 1.0 / self.resolution
-            grid_3d = torch.zeros((B, self.resolution, self.resolution, 1, 3), device=grid_2d.device)
-            grid_3d[..., 0] = grid_2d[..., 0:1]
-            grid_3d[..., 1] = grid_2d[..., 1:2]
-            grid_3d[..., 2] = dx
+            # AL4PDE CFDSim expects spatial grid [H, W, 2] without batch dimension
+            grid_spatial = grid_2d[0] if grid_2d.ndim == 4 else grid_2d
             ic_t = torch.from_numpy(full_states)
             pm_t = torch.from_numpy(params.astype(np.float32))
             
             with torch.no_grad():
-                res = sim(ic_t, pm_t, grid_3d)
+                res = sim(ic_t, pm_t, grid_spatial)
                 traj = res[0]
             traj_np = traj.detach().cpu().numpy()
             if traj_np.ndim == 5 and traj_np.shape[1] == steps + 1:
