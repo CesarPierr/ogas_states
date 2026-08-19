@@ -289,13 +289,12 @@ class PDE:
             full_states[..., 3] = 1.0 # pressure
             
             gen = self._ic_generator()
-            grid_2d = gen.get_grid(B)
-            grid_3d = torch.cat([grid_2d.unsqueeze(3), torch.zeros((B, self.resolution, self.resolution, 1, 1), device=grid_2d.device)], dim=-1)
+            grid = gen.get_grid(B)
             ic_t = torch.from_numpy(full_states)
             pm_t = torch.from_numpy(params.astype(np.float32))
             
             with torch.no_grad():
-                res = sim(ic_t, pm_t, grid_3d)
+                res = sim(ic_t, pm_t, grid)
                 traj = res[0]
             traj_np = traj.detach().cpu().numpy()
             if traj_np.ndim == 5 and traj_np.shape[1] == steps + 1:
