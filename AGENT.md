@@ -1,156 +1,70 @@
-g# AGENT.md
+# AGENT.md: Operational Guide for AI Assistants & Developers
 
-## Scope
+## 1. Project Purpose & Scope
 
-This repo is a small autonomous experiment for 1D pool-based surrogate learning.
-Keep it simple. Do not import Melissa, ICML, or `apebench_online`.
+**OGAS** (*Operator-Guided Active Sampling*) is an active learning framework for neural PDE surrogates.
+The core hypothesis is that **conditional generative state proposal (OT-CFM / Pushforward)** improves surrogate sample efficiency and multi-step rollout stability by populating an off-attractor recovery tube, outperforming passive solver trajectories and classical active learning.
 
-Root:
+---
 
-```text
-/home/cesarpi-ext/poolbased_surrogate_1d
-```
+## 2. Invariant Rules & Design Standards
 
-## Purpose
+1. **Exact Budget Parity**: Every active learning round $R$ maintains exactly $N = \text{trajectories\_per\_round} \times \text{steps\_per\_trajectory}$ transitions.
+2. **Deterministic & Seeded**: All random sampling (parameters, initial conditions, model weights) is seeded and bit-reproducible.
+3. **Google / MIT Research Standards**: Keep code concise, explicit, fully typed, with zero unnecessary abstractions or framework bloat.
 
-Compare:
+---
 
-1. uniform trajectory sampling at every round
-2. mixed sampling: some uniform trajectories plus DDPM-generated states
+## 3. Key Package Components (`poolbased_surrogate/`)
 
-One sample is one transition:
+| Module | Role |
+|---|---|
+| [`config.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/config.py) | Strongly-typed dataclass YAML configurations (`PDEConfig`, `PoolConfig`, `TrainConfig`). |
+| [`pde.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/pde.py) | Unified simulator engine for 1D (KS, Burgers) and 2D (Navier-Stokes Kolmogorov Flow). |
+| [`strategies.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/strategies.py) | Acquisition strategy registry: `UniformStrategy`, `HeuristicTubeStrategy`, `ClassicalALStrategy`, `GenerativeStrategy`. |
+| [`models/surrogate.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/models/surrogate.py) | `ExactAL4PDEUnet1D`, `ExactAL4PDEUnet2D`, and `EnsembleSurrogate`. |
+| [`models/ddpm.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/models/ddpm.py) | OT-CFM Flow Matching (`FlowMatching1D`) and Conditional DDPM (`DDPM1D`). |
+| [`eval.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/eval.py) | GPU-vectorized multi-step rollouts and metric evaluation engine. |
+| [`run.py`](file:///leonardo/home/userexternal/pcesar00/ogas_states/poolbased_surrogate/run.py) | Active learning pipeline orchestrator. |
 
-```text
-(state_t, pde_parameter) -> state_{t+1}
-```
+---
 
-Required invariant:
+## 4. Key Execution Commands
 
-```text
-n_samples = pool.trajectory_steps * pool.n_trajectories
-```
-
-Round 0 always uses only uniform trajectories. Later rounds may replace part of
-the pool with generated states advanced by one PDE step.
-
-## Commands
-
-Install env:
-
+### Local Smoke Test (< 30 seconds)
 ```bash
-cd /home/cesarpi-ext/ogas_states
-scripts/install_uv_env.sh
-source /bettik/PROJECTS/pr-melissa/cesarpi-ext/.poolbased-surrogate-venv/bin/activate
+python -m poolbased_surrogate.run \
+  --config configs/phase2_ks_v3.yaml \
+  --output ./test_run \
+  --override pool.n_rounds=2 \
+  --override pool.trajectories_per_round=4 \
+  --override pool.steps_per_trajectory=5 \
+  --override surrogate.epochs=2 \
+  --override generator.epochs=2 \
+  --override wandb.enabled=false
 ```
 
-Smoke:
-
+### SLURM Master Suite Launchers
 ```bash
-python -m poolbased_surrogate.run configs/smoke.yaml
-python -m poolbased_surrogate.run configs/smoke_weighted.yaml
+# 1D KS Master Suite (Pushforward, V3, Ensemble Scaling across 10 seeds)
+bash scripts/launch_full_suite_slurm.sh
+
+# 1D Burgers Master Suite (Uniform, Tube, Sobolev, Spectrum across 10 seeds)
+bash scripts/launch_burgers_suite_slurm.sh
+
+# 1D Classical Active Learning (Top-K / SBAL)
+bash scripts/launch_classical_al_ks_slurm.sh
+bash scripts/launch_classical_al_burgers_slurm.sh
+
+# 2D Navier-Stokes AL4PDE Pilot Suite
+bash scripts/launch_2d_kolmogorov_slurm.sh
 ```
 
-Resume:
-
+### Post-Processing & Figures
 ```bash
-python -m poolbased_surrogate.run configs/default_1d.yaml --resume
+# Generate all publication figures
+python scripts/generate_publication_figures.py
+
+# Generate consolidated report
+python scripts/generate_full_picture_report.py
 ```
-
-Bigfoot GPU:
-
-```bash
-BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_uniform.yaml
-BIGFOOT_WALLTIME=08:00:00 BIGFOOT_NUM_GPUS=1 BIGFOOT_GPU_MODEL=A100 scripts/submit_bigfoot.sh configs/bigfoot_mixed.yaml
-```
-
-## Main Files
-
-```text
-poolbased_surrogate/config.py            dataclass YAML config
-poolbased_surrogate/pde.py               1D periodic PDE solvers and samplers
-poolbased_surrogate/data.py              transition pool and datasets
-poolbased_surrogate/models/surrogate.py  Conv1D surrogate and ensemble wrapper
-poolbased_surrogate/models/ddpm.py       Conv1D DDPM
-poolbased_surrogate/train.py             train surrogate/DDPM, propose losses
-poolbased_surrogate/eval.py              Halton validation and rollout metrics
-poolbased_surrogate/run.py               full experiment loop and checkpointing
-```
-
-## DDPM Modes
-
-`conditional_loss`:
-
-```text
-p(state | loss)
-```
-
-Loss proposal samples from previous normalized losses plus small noise.
-
-`weighted_unconditional`:
-
-```text
-p(state)
-```
-
-Training weights each state by `0.05 + normalized_loss`, giving density biased
-toward high-loss states.
-
-## Checkpointing
-
-Checkpoint:
-
-```text
-<output_dir>/checkpoint_latest.pt
-```
-
-Saves after each completed round:
-
-- next round index
-- surrogate weights
-- DDPM weights
-- transition pool
-- losses
-- history
-- NumPy and Torch RNG states
-- WandB run id
-
-Resume granularity is round-level. Mid-round walltime loss repeats the current
-round from the last completed checkpoint.
-
-## WandB
-
-WandB is optional in config. Resume reuses same run id.
-
-Useful metrics:
-
-- `val/nrmse_mean`
-- `rollout/nrmse_final`
-- `pool/loss_mean`
-- `pool/loss_p90`
-- `train/loss`
-- `ddpm/loss`
-
-## Comparison Configs
-
-Uniform baseline:
-
-```text
-configs/compare_uniform.yaml
-```
-
-Mixed DDPM conditional:
-
-```text
-configs/compare_mixed_conditional.yaml
-```
-
-Both use same seed and validation setup. Only sampling strategy differs.
-
-## Rules For Future Edits
-
-- Keep code standalone.
-- Keep config surface small.
-- Preserve `n_samples = T * n_trajectories`.
-- Prefer simple NumPy/Torch over framework abstractions.
-- Add tests through smoke configs, not heavy infrastructure.
-- Do not commit `runs/`, checkpoints, `.egg-info`, or caches.
