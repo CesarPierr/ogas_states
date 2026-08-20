@@ -21,32 +21,43 @@ class ExactAL4PDEUnet1D(nn.Module):
         param_dim: int = 1,
         hidden_channels: int = 64,
         difference_weight: float = 0.3,
-        num_layers: int = 5,
-        n_channels: int = 1,
+        padding_mode: str = "circular",
     ):
         super().__init__()
         ensure_al4pde_paths()
         from al4pde.modules.unet_cond_1d import Unet1D
+        self.difference_weight = float(difference_weight)
         self.net = Unet1D(
-            dim=1,
-            num_channels=n_channels,
-            num_layers=num_layers,
-            hidden_channels=hidden_channels,
-            use_conditioning=True,
-            param_dim=param_dim,
-            difference_weight=difference_weight,
+            padding_mode=padding_mode,
+            n_input_scalar_components=1,
+            n_input_vector_components=0,
+            n_output_scalar_components=1,
+            n_output_vector_components=0,
+            time_history=1,
+            time_future=1,
+            hidden_channels=int(hidden_channels),
+            activation="gelu",
+            norm=True,
+            ch_mults=[1, 2, 2, 4],
+            is_attn=[False, False, False, False],
+            mid_attn=False,
+            n_blocks=2,
+            param_conditioning=f"scalar_{int(param_dim)}" if param_dim > 0 else None,
+            use_scale_shift_norm=False,
+            use1x1=False,
+            n_dims=1,
+            features="last_layer",
         )
         self.param_dim = param_dim
 
     def forward(self, state: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
         if state.ndim == 2:
-            state = state[:, None, :]
-        if state.ndim == 3:
-            state = state.unsqueeze(1) # [B, T=1, C, N]
+            state = state[:, None, :] # [B, 1, X]
         if params.ndim == 1:
             params = params[:, None]
-        out = self.net(state, z=params)
-        return out.squeeze(1)
+        out = self.net(state[:, None, :, :], z=params, time=None)
+        delta = out[:, 0, :, :]
+        return state + self.difference_weight * delta
 
 
 class ExactAL4PDEUnet2D(nn.Module):
@@ -56,30 +67,43 @@ class ExactAL4PDEUnet2D(nn.Module):
         param_dim: int = 2,
         hidden_channels: int = 64,
         difference_weight: float = 0.3,
-        num_layers: int = 5,
-        n_channels: int = 2,
+        padding_mode: str = "circular",
     ):
         super().__init__()
         ensure_al4pde_paths()
         from al4pde.modules.unet_cond_2d import Unet2D
+        self.difference_weight = float(difference_weight)
         self.net = Unet2D(
-            dim=2,
-            num_channels=n_channels,
-            num_layers=num_layers,
-            hidden_channels=hidden_channels,
-            use_conditioning=True,
-            param_dim=param_dim,
-            difference_weight=difference_weight,
+            padding_mode=padding_mode,
+            n_input_scalar_components=0,
+            n_input_vector_components=1,
+            n_output_scalar_components=0,
+            n_output_vector_components=1,
+            time_history=1,
+            time_future=1,
+            hidden_channels=int(hidden_channels),
+            activation="gelu",
+            norm=True,
+            ch_mults=[1, 2, 2, 4],
+            is_attn=[False, False, False, False],
+            mid_attn=False,
+            n_blocks=2,
+            param_conditioning=f"scalar_{int(param_dim)}" if param_dim > 0 else None,
+            use_scale_shift_norm=False,
+            use1x1=False,
+            features="last_layer",
         )
         self.param_dim = param_dim
 
     def forward(self, state: torch.Tensor, params: torch.Tensor) -> torch.Tensor:
-        if state.ndim == 4:
-            state = state.unsqueeze(1) # [B, T=1, C=2, H, W]
+        if state.ndim == 3:
+            state = state[:, None, :, :] # [B, C=2, H, W]
         if params.ndim == 1:
             params = params[:, None]
-        out = self.net(state, z=params)
-        return out.squeeze(1)
+        out = self.net(state[:, None, :, :, :], z=params, time=None)
+        delta = out[:, 0, :, :, :]
+        return state + self.difference_weight * delta
+
 
 
 class ConvBlock(nn.Module):
