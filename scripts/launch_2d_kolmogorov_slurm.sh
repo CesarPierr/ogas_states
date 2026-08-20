@@ -44,6 +44,9 @@ export JAX_PLATFORMS=cuda,cpu
 module load profile/deeplrn
 module load cuda/12.3
 
+export PATH="/leonardo/prod/opt/compilers/cuda/12.3/none/bin:$PATH"
+export LD_LIBRARY_PATH="/leonardo/prod/opt/compilers/cuda/12.3/none/lib64:${LD_LIBRARY_PATH:-}"
+
 source .venv/bin/activate
 
 python -u scripts/run_2d_kolmogorov_pilot.py \
