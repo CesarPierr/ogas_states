@@ -1,0 +1,100 @@
+seed: 101
+device: cuda
+output_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/burgers_hard2/base
+
+# Burgers GENERALITY experiment HARD2 config.
+# Derived from configs/leonardo_burgers_hard.yaml. Prior attempts (base + hard) both
+# hit "NO HEADROOM": the surrogate trivially predicts next~=current because each
+# outer step integrated almost no PHYSICAL TIME (dt=2e-4, n_substeps=1 -> the whole
+# 30-step trajectory spanned only t=0.006, ~0.17%/step change). Lowering viscosity
+# made it EASIER (removed the only dynamic). The fix is PHYSICAL TIME PER STEP:
+#   pde.n_substeps 1 -> 50  (each outer step = 50*dt = t=0.01, ~20x longer horizon)
+#   pde.n_warmup   0 -> 60  (start from the shock-laden attractor, not the smooth IC)
+#   pde.resolution 256 -> 512 (shocks carry RESOLVED high-k content the TV signal sees;
+#                              the 1D-conv surrogate/generator are resolution-agnostic)
+# Viscosity kept LOW ([3e-4, 3e-3]) -> at a real horizon this gives genuine sharp shocks.
+# Solver cost: more substeps + higher res = slower batch_size=1 Burgers solver, so the
+# pool is kept small (n_trajectories 80, trajectory_steps 20). Offline probe showed the
+# relative one-step change rises from ~0.0017 to >=0.05 in this regime.
+# NEW validation paths (burgers_hard2_*). Arms override ddpm/pool/surrogate via --set.
+
+pde:
+  name: burgers
+  backend: al4pde
+  resolution: 512
+  domain_length: 1.0
+  dt: 0.0002
+  n_substeps: 50      # each outer step covers 50*dt = t=0.01 of physical time
+  n_warmup: 60        # advance IC past the smooth start onto the shock-laden attractor
+  viscosity_range: [0.0003, 0.003]
+  param_ranges:
+    - [0.0003, 0.003]
+  param_log_scale: [true]
+  ic:
+    modes: 5
+    amplitude: 1.0
+
+pool:
+  rounds: 10
+  trajectory_steps: 20
+  n_trajectories: 80
+  uniform_fraction: 0.5
+  strategy: generator
+
+surrogate:
+  hidden: 64
+  depth: 4
+  ensemble_size: 2
+  ensemble_bootstrap: true
+  epochs_per_round: 15
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  difficulty_signal: ensemble_var
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 128
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 2048
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+  # --- v3 conditioning hygiene (mirrors leonardo_ks_v3_base) ---
+  difficulty_from: pretrain
+  difficulty_stats: ema
+  difficulty_stats_momentum: 0.7
+  self_train_weight: 0.3
+  noise_prior: spectrum
+  candidate_factor: 4
+  realism_tv_gate: 3.0
+  sample_mode: scratch          # gen_phys_tv_edit / gen_v3_edit arms override to edit
+
+validation:
+  n_trajectories: 300
+  trajectory_steps: 40
+  path: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/burgers_hard2_bank.npz
+  hard_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_validation/burgers_hard2_suite
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 40
+  epoch_n_trajectories: 150
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: burgers_hard2

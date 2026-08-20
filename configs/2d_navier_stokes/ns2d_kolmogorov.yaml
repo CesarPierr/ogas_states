@@ -1,0 +1,35 @@
+seed: 101
+device: cuda
+output_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/ns2d_kolmogorov_sweep
+
+pde:
+  name: ns2d
+  backend: al4pde
+  resolution: 128
+  domain_length: 1.0
+  dt: 0.05
+  viscosity_range: [0.001, 0.01]
+  param_ranges:
+    - [0.001, 0.01]
+    - [1.0, 4.0]
+  param_log_scale: [true, false]
+
+pool:
+  rounds: 5
+  n_trajectories: 16
+  trajectory_steps: 25
+  initial_trajectories: 8
+
+surrogate:
+  model: unet2d
+  hidden_channels: 64
+  param_conditioning: scalar_2
+  epochs_per_round: 10
+  batch_size: 8
+  lr: 0.001
+
+generator:
+  architecture: streamfunction_flow_matching
+  hidden_channels: 32
+  loss_condition: quantile
+  steps: 50
