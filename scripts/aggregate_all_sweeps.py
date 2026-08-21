@@ -129,6 +129,72 @@ def aggregate_2d_ns():
             
     print("=" * 90)
 
-if __name__ == "__main__":
+def aggregate_extended_sweep(sweep_prefix: str, sweep_title: str):
+    base_scratch = Path("/leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs")
+    strats = ["uniform_baseline", "heuristic_tube", "classic_al_topk", "classic_al_sbal", "ogas_generative"]
+    
+    for m in [2, 3, 5]:
+        sweep_dir = base_scratch / f"{sweep_prefix}_M{m}"
+        if not sweep_dir.exists():
+            continue
+            
+        print("\n" + "=" * 90)
+        print(f"{sweep_title} (M={m}, 10 SEEDS, UNCERTAINTY ACQUISITION) BENCHMARK")
+        print("=" * 90)
+        print(f"{'Strategy':22s} | {'Completed':10s} | {'Rollout NRMSE':22s} | {'1-Step NRMSE':22s}")
+        print("-" * 90)
+        
+        runs = sorted(glob.glob(f"{sweep_dir}/*"))
+        for s in strats:
+            s_runs = [r for r in runs if s in r]
+            rollouts = []
+            step1s = []
+            completed = 0
+            
+            for r in s_runs:
+                h_file = Path(r) / "history.json"
+                if h_file.exists():
+                    try:
+                        with open(h_file) as f:
+                            h = json.load(f)
+                            if len(h) >= 10:
+                                completed += 1
+                                last = h[-1]
+                                if "rollout/nrmse_mean" in last:
+                                    rollouts.append(last["rollout/nrmse_mean"])
+                                if "val/nrmse_mean" in last:
+                                    step1s.append(last["val/nrmse_mean"])
+                    except Exception:
+                        pass
+                else:
+                    out_files = sorted(glob.glob(f"{r}/*.out"))
+                    if out_files:
+                        try:
+                            content = Path(out_files[-1]).read_text()
+                            if "round 9:" in content:
+                                matches = re.findall(r'"rollout/nrmse_mean":\s*([\d\.e\-]+)', content)
+                                if matches:
+                                    rollouts.append(float(matches[-1]))
+                                    completed += 1
+                                m_step1 = re.findall(r'"val/nrmse_mean":\s*([\d\.e\-]+)', content)
+                                if m_step1:
+                                    step1s.append(float(m_step1[-1]))
+                        except Exception:
+                            pass
+                            
+            if completed > 0:
+                r_str = f"{np.mean(rollouts):.4f} +/- {np.std(rollouts):.4f}" if rollouts else "N/A"
+                s_str = f"{np.mean(step1s):.4f} +/- {np.std(step1s):.4f}" if step1s else "N/A"
+                print(f"{s:22s} | {completed:2d}/10      | {r_str:22s} | {s_str:22s}")
+            else:
+                print(f"{s:22s} |  0/10      | Pending / Running      | Pending / Running")
+        print("=" * 90)
+
+def main():
     aggregate_1d_burgers()
     aggregate_2d_ns()
+    aggregate_extended_sweep("forced_burgers_sweep", "3. FORCED BURGERS (BURGULENCE)")
+    aggregate_extended_sweep("kdv_burgers_sweep", "4. KDV-BURGERS (DISPERSIVE + VISCOUS)")
+
+if __name__ == "__main__":
+    main()

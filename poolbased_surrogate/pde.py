@@ -77,6 +77,87 @@ class SqueezeTensorWrapper:
         return self.squeeze()
 
 
+class AL4PDECESim:
+    """Official AL4PDE CE (Combined Equation with WENO5) Simulator Wrapper."""
+    def __init__(self, dt: float, steps: int, L: float, nx: int, alpha: float = 1.0, beta: float = 0.005, gamma: float = 0.0, forcing: bool = False, n_substeps: int = 8):
+        self.dt = dt
+        self.steps = steps
+        self.L = L
+        self.nx = nx
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.forcing = forcing
+        self.n_substeps = max(1, n_substeps)
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        
+    def __call__(self, ic, pde_params, grid):
+        if isinstance(ic, torch.Tensor):
+            ic_np = ic.detach().cpu().numpy()
+        else:
+            ic_np = np.asarray(ic)
+            
+        if ic_np.ndim == 4:
+            ic_np = ic_np[:, 0, :, 0]
+        elif ic_np.ndim == 3:
+            ic_np = ic_np[:, 0, :]
+            
+        B, nx = ic_np.shape
+        tmax = float(self.steps * self.dt)
+        nt_macro = self.steps + 1
+        nt_fine = (nt_macro - 1) * self.n_substeps + 1
+        
+        from al4pde.tasks.sim.mp_pde_solvers.equations.PDEs import CE
+        from al4pde.tasks.sim.mp_pde_solvers.temporal.solvers import Solver, RKSolver
+        from al4pde.tasks.sim.mp_pde_solvers.temporal.tableaux import ExplicitRungeKutta4
+        
+        # If parameters provided, use beta / gamma from params
+        beta_val = self.beta
+        gamma_val = self.gamma
+        if pde_params is not None:
+            pm = pde_params.detach().cpu().numpy() if isinstance(pde_params, torch.Tensor) else np.asarray(pde_params)
+            if pm.ndim >= 2 and pm.shape[-1] >= 1:
+                beta_val = float(np.mean(pm[:, 0]))
+            if pm.ndim >= 2 and pm.shape[-1] >= 2:
+                gamma_val = float(np.mean(pm[:, 1]))
+                
+        pde = CE(
+            tmin=0.0,
+            tmax=tmax,
+            grid_size=[nt_fine, nx],
+            L=self.L,
+            flux_splitting="godunov",
+            alpha=self.alpha,
+            beta=beta_val,
+            gamma=gamma_val,
+            device=self.device,
+        ).double()
+        
+        if self.forcing:
+            x_pts = torch.linspace(0, self.L, nx, device=self.device, dtype=torch.float64)
+            k_modes = np.array([1, 2, 3])
+            def force_fn(t):
+                t_val = float(t.detach().cpu().item()) if isinstance(t, torch.Tensor) else float(t)
+                f_val = torch.zeros(B, 1, nx, device=self.device, dtype=torch.float64)
+                for i, km in enumerate(k_modes):
+                    f_val += (1.5 / km) * torch.sin(2.0 * np.pi * km * x_pts.view(1, 1, nx) / self.L + (km * 1.1) + 1.2 * t_val)
+                return f_val
+            pde.force = force_fn
+            
+        time_solver = RKSolver(ExplicitRungeKutta4(), device=self.device)
+        solver = Solver(time_solver, pde.WENO_reconstruction)
+        
+        times_fine = torch.linspace(0.0, tmax, nt_fine, dtype=torch.float64).unsqueeze(0).to(self.device)
+        u0 = torch.from_numpy(ic_np).unsqueeze(1).to(self.device).double()
+        
+        with torch.no_grad():
+            sol_fine = solver.solve(u0, times_fine)
+            
+        sol_macro = sol_fine[:, ::self.n_substeps, :, :]
+        traj_out = sol_macro.permute(0, 1, 3, 2).float() # [B, nt_macro, nx, 1]
+        return traj_out, None, None
+
+
 class PDE:
     """Unified PDE Simulator & Sampler for 1D and 2D equations."""
 
@@ -101,6 +182,18 @@ class PDE:
         return self.name == "burgers"
 
     @property
+    def is_forced_burgers(self) -> bool:
+        return self.name in {"forced_burgers", "burgulence"}
+
+    @property
+    def is_kdv_burgers(self) -> bool:
+        return self.name in {"kdv_burgers", "kdv"}
+
+    @property
+    def is_ce(self) -> bool:
+        return self.is_forced_burgers or self.is_kdv_burgers
+
+    @property
     def is_2d(self) -> bool:
         return self.spatial_dim == 2
 
@@ -108,8 +201,10 @@ class PDE:
     def param_ranges(self) -> list[tuple[float, float]]:
         if self.cfg.param_ranges is not None:
             return [tuple(float(v) for v in pair) for pair in self.cfg.param_ranges]
-        if self.is_burgers:
+        if self.is_burgers or self.is_forced_burgers:
             return [tuple(float(v) for v in self.cfg.viscosity_range)]
+        if self.is_kdv_burgers:
+            return [tuple(float(v) for v in self.cfg.viscosity_range), (1e-5, 1e-4)]
         if self.is_ks:
             return [(0.5, 4.0), (0.1, 100.0)]
         if self.is_2d:
@@ -184,11 +279,11 @@ class PDE:
                 length=float(self.cfg.ic.get("length", 1.0)),
                 in_fourier_domain=bool(self.cfg.ic.get("in_fourier_domain", False)),
             )
-        if self.is_burgers:
+        if self.is_burgers or self.is_ce:
             from al4pde.tasks.ic_gen.ic_gen_burgers import ICGenBurgers
             return ICGenBurgers(
-                k_tot=int(self.cfg.ic.get("k_tot", 4)),
-                num_choice_k=int(self.cfg.ic.get("num_choice_k", 2)),
+                k_tot=int(self.cfg.ic.get("k_tot", 6)),
+                num_choice_k=int(self.cfg.ic.get("num_choice_k", 3)),
                 xL=0.0,
                 xR=self.length,
                 nx=self.resolution,
@@ -271,6 +366,30 @@ class PDE:
                 if_norm=False,
                 if_second_order=float(self.cfg.ic.get("if_second_order", 1.0)),
             )
+        if self.is_forced_burgers:
+            return AL4PDECESim(
+                dt=self.dt,
+                steps=steps,
+                L=self.length,
+                nx=self.resolution,
+                alpha=1.0,
+                beta=float(self.cfg.ic.get("viscosity", 0.008)),
+                gamma=0.0,
+                forcing=True,
+                n_substeps=self.n_substeps,
+            )
+        if self.is_kdv_burgers:
+            return AL4PDECESim(
+                dt=self.dt,
+                steps=steps,
+                L=self.length,
+                nx=self.resolution,
+                alpha=1.0,
+                beta=float(self.cfg.ic.get("viscosity", 0.008)),
+                gamma=float(self.cfg.ic.get("dispersion", 0.05)),
+                forcing=False,
+                n_substeps=self.n_substeps,
+            )
         if self.is_2d:
             from al4pde.tasks.sim.cfd import CFDSim
             return CFDSim(
@@ -336,6 +455,17 @@ class PDE:
             with torch.no_grad():
                 traj, _, _ = sim(SqueezeTensorWrapper(ic), SqueezeTensorWrapper(pm, is_params=True), grid)
             full = traj.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32)
+            if self.n_substeps > 1:
+                return full[:, ::self.n_substeps]
+            return full
+        elif self.is_ce:
+            ic = torch.from_numpy(states[:, 0, :].astype(np.float32))
+            pm = torch.from_numpy(params.astype(np.float32))
+            grid = self.grid(B)
+            with torch.no_grad():
+                traj, _, _ = sim(ic, pm, grid)
+            full = traj.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32)
+            return full
         else:
             ic = torch.from_numpy(states[:, 0, :, None, None].astype(np.float32))
             pm = torch.from_numpy(params.astype(np.float32))
@@ -343,10 +473,9 @@ class PDE:
             with torch.no_grad():
                 traj, _, _ = sim(ic, pm, grid)
             full = traj.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32)
-
-        if self.n_substeps > 1:
-            return full[:, ::self.n_substeps]
-        return full
+            if self.n_substeps > 1:
+                return full[:, ::self.n_substeps]
+            return full
 
     def step(self, u: np.ndarray, p: np.ndarray) -> np.ndarray:
         """Advance single transitions by one time step."""

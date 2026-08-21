@@ -1,0 +1,86 @@
+seed: 101
+device: auto
+output_dir: /leonardo_scratch/fast/EUHPC_D36_033/ogas_states_runs/forced_burgers_sweep/base
+
+# Forced Burgers ("Burgulence"): Stationary Turbulent Shock Collisions
+# Continuous large-scale stochastic forcing maintains persistent shocks.
+# Uses official AL4PDE CE WENO5 Godunov + Runge-Kutta solver.
+
+pde:
+  name: forced_burgers
+  backend: al4pde
+  resolution: 256
+  domain_length: 16.0
+  dt: 0.035
+  n_substeps: 8
+  n_warmup: 0
+  viscosity_range: [0.004, 0.012]
+  param_ranges:
+    - [0.004, 0.012]
+  param_log_scale: [true]
+  ic:
+    modes: 6
+    amplitude: 2.2
+    viscosity: 0.008
+
+pool:
+  rounds: 10
+  trajectory_steps: 20
+  n_trajectories: 80
+  uniform_fraction: 0.5
+  strategy: generator
+
+surrogate:
+  hidden: 64
+  depth: 4
+  ensemble_size: 2
+  ensemble_bootstrap: true
+  epochs_per_round: 15
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0
+  difference_weight: 0.3
+
+ddpm:
+  enabled: true
+  generator: flow_matching
+  mode: conditional_quantile
+  param_mode: condition
+  param_prior: uniform
+  steps: 64
+  hidden: 64
+  residual_blocks: 2
+  kernel_size: 7
+  n_quantiles: 20
+  quant_embed_dim: 0
+  loss_metric: rmse
+  difficulty_signal: ensemble_var
+  train_epochs: 10
+  sample_strategy: top_half
+  sample_strategy_temp: 0.5
+  batch_size: 128
+  lr: 0.0002
+  sample_temperature: 1.0
+  sample_batch_size: 2048
+  generated_pool_mode: transition
+  solver_batch_size: 1024
+  difficulty_from: pretrain
+  difficulty_stats: ema
+  difficulty_stats_momentum: 0.7
+  self_train_weight: 0.3
+  noise_prior: spectrum
+  candidate_factor: 4
+  realism_tv_gate: 3.5
+  sample_mode: scratch
+
+validation:
+  n_trajectories: 200
+  trajectory_steps: 40
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99]
+  rollout_steps: 40
+  epoch_n_trajectories: 100
+
+wandb:
+  enabled: true
+  project: poolbased-surrogate-1d
+  group: forced_burgers_sweep
