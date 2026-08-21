@@ -458,12 +458,22 @@ def make_strategy_transitions(
     if strategy == "mined_ic":
         cand = pde.sample_ic_uniform(want, rng)
         return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
-    if strategy == "uniform_select":
+    if strategy == "uniform_select" or strategy == "classic_al_topk":
         # On-attractor active selection: oversample anchors (real attractor states),
-        # rank by ensemble disagreement, keep the N most uncertain.
+        # rank by ensemble disagreement or surrogate error, keep the N hardest.
         anchor_idx = rng.choice(len(anchors), size=want, replace=len(anchors) < want)
         cand = anchors[anchor_idx].astype(np.float32)
         return _keep_hardest(cand, pde.sample_params_uniform(want, rng), surrogate, n, device)
+    if strategy == "classic_al_sbal":
+        anchor_idx = rng.choice(len(anchors), size=want, replace=len(anchors) < want)
+        cand = anchors[anchor_idx].astype(np.float32)
+        params = pde.sample_params_uniform(want, rng)
+        if surrogate is not None:
+            dis = ensemble_disagreement(surrogate, cand, params, device)
+            p_dist = (dis + 1e-12) / np.sum(dis + 1e-12)
+            sel_idx = rng.choice(len(dis), size=n, replace=False, p=p_dist)
+            return cand[sel_idx].astype(np.float32), params[sel_idx].astype(np.float32)
+        return cand[:n].astype(np.float32), params[:n].astype(np.float32)
     raise ValueError(f"pool.strategy inconnue : {strategy!r}")
 
 
@@ -501,6 +511,9 @@ def make_mixed_pool(
     edit_t0: float = 0.6,
     candidate_factor: int = 1,
     realism_tv_gate: float = 0.0,
+    classic_al_oversample: int = 10,
+    sbal_alpha: float = 1.0,
+    **kwargs,
 ) -> TransitionPool:
     n_uniform = int(round(n_traj * uniform_fraction))
     n_generated_traj = n_traj - n_uniform
@@ -518,11 +531,12 @@ def make_mixed_pool(
 
     # Generator-free baseline strategies fill the non-uniform half with single-step
     # transitions at exactly one solver step per kept state (budget-matched).
-    if n_generated_traj > 0 and strategy in ("random_tube", "tube_select", "mined_ic", "uniform_select"):
+    if n_generated_traj > 0 and strategy in ("random_tube", "tube_select", "mined_ic", "uniform_select", "classic_al_topk", "classic_al_sbal"):
         n_generated = n_generated_traj * steps
+        effective_factor = max(candidate_factor, classic_al_oversample)
         states0, params = make_strategy_transitions(
             strategy, pde, surrogate, anchors, n_generated, rng, device, solver_batch_size,
-            tube_rho_min, tube_rho_max, tube_kmax, candidate_factor,
+            tube_rho_min, tube_rho_max, tube_kmax, effective_factor,
         )
         next_state = safe_step_transitions(
             pde, states0, params, batch_size=solver_batch_size, progress_label=f"{strategy} transitions"
