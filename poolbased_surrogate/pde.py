@@ -15,6 +15,9 @@ from typing import Sequence
 import numpy as np
 import torch
 
+if not torch.cuda.is_available() and "JAX_PLATFORMS" not in os.environ:
+    os.environ["JAX_PLATFORMS"] = "cpu"
+
 from .config import PDEConfig
 
 DEFAULT_EXTERNAL = Path("/bettik/PROJECTS/pr-melissa/cesarpi-ext/external")
@@ -57,15 +60,21 @@ class SqueezeTensorWrapper:
         self.is_params = is_params
 
     def squeeze(self, *args, **kwargs):
-        if self.is_params and self.tensor.ndim == 2:
-            return self.tensor
-        return self.tensor.squeeze(*args, **kwargs)
+        arr = self.tensor.detach().cpu().numpy() if isinstance(self.tensor, torch.Tensor) else np.asarray(self.tensor)
+        if self.is_params:
+            return arr.reshape(-1)
+        if arr.ndim >= 2:
+            return arr.reshape(arr.shape[0], -1)
+        return arr
+
+    def detach(self):
+        return self
 
     def cpu(self):
-        return self.tensor.cpu()
+        return self
 
     def numpy(self):
-        return self.tensor.cpu().numpy()
+        return self.squeeze()
 
 
 class PDE:
@@ -130,6 +139,9 @@ class PDE:
 
     def sample_params_uniform(self, n: int, rng: np.random.Generator) -> np.ndarray:
         return self.sample_params(n, int(rng.integers(0, 2**31 - 1)))
+
+    def sample_params_halton(self, n: int, seed: int) -> np.ndarray:
+        return self.sample_params(n, seed)
 
     def normalize_params(self, params: np.ndarray) -> np.ndarray:
         """Map physical PDE parameters to normalized [0, 1] space."""
@@ -229,6 +241,9 @@ class PDE:
     def sample_ic_uniform(self, n: int, rng: np.random.Generator) -> np.ndarray:
         return self.sample_ic(n, int(rng.integers(0, 2**31 - 1)))
 
+    def sample_ic_halton(self, n: int, seed: int) -> np.ndarray:
+        return self.sample_ic(n, seed)
+
     def grid(self, n: int = 1) -> torch.Tensor:
         grid = self._ic_generator().get_grid(n)
         return grid.detach().cpu().float()
@@ -282,6 +297,12 @@ class PDE:
         sim = self.simulator(steps)
         
         if self.is_2d:
+            orig_b = B
+            if B == 1:
+                states = np.repeat(states, 2, axis=0)
+                params = np.repeat(params, 2, axis=0)
+                B = 2
+
             full_states = np.zeros((B, self.resolution, self.resolution, 1, 4), dtype=np.float32)
             full_states[..., 0] = 1.0 # density
             full_states[..., 1] = states[:, 0, :, :, None] # vx
@@ -300,22 +321,21 @@ class PDE:
                 traj = res[0]
             traj_np = traj.detach().cpu().numpy()
             if traj_np.ndim == 5 and traj_np.shape[1] == steps + 1:
-                return traj_np[..., [1, 2]].transpose(0, 1, 4, 2, 3).astype(np.float32)
+                out = traj_np[..., [1, 2]].transpose(0, 1, 4, 2, 3).astype(np.float32)
             elif traj_np.ndim == 5 and traj_np.shape[3] == steps + 1:
-                return traj_np[..., [1, 2]].transpose(0, 3, 4, 1, 2).astype(np.float32)
-            return traj_np[..., [1, 2]].transpose(0, 1, 4, 2, 3).astype(np.float32)
+                out = traj_np[..., [1, 2]].transpose(0, 3, 4, 1, 2).astype(np.float32)
+            else:
+                out = traj_np[..., [1, 2]].transpose(0, 1, 4, 2, 3).astype(np.float32)
+            return out[:orig_b]
 
         # 1D Simulation
         if self.is_burgers:
-            trajs = []
-            for i in range(B):
-                ic_i = torch.from_numpy(states[i:i+1, 0, :, None, None].astype(np.float32))
-                pm_i = torch.from_numpy(params[i:i+1].astype(np.float32))
-                grid_i = self.grid(1)
-                with torch.no_grad():
-                    traj_i, _, _ = sim(SqueezeTensorWrapper(ic_i), SqueezeTensorWrapper(pm_i, is_params=True), grid_i)
-                trajs.append(traj_i.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32))
-            full = np.concatenate(trajs, axis=0)
+            ic = torch.from_numpy(states[:, 0, :, None, None].astype(np.float32))
+            pm = torch.from_numpy(params.astype(np.float32))
+            grid = self.grid(1)
+            with torch.no_grad():
+                traj, _, _ = sim(SqueezeTensorWrapper(ic), SqueezeTensorWrapper(pm, is_params=True), grid)
+            full = traj.detach().cpu().numpy().transpose(0, 1, 3, 2).astype(np.float32)
         else:
             ic = torch.from_numpy(states[:, 0, :, None, None].astype(np.float32))
             pm = torch.from_numpy(params.astype(np.float32))

@@ -461,10 +461,19 @@ def main(argv: list[str] | None = None) -> None:
         ):
             if value is not None:
                 pool_arrays[key] = value
-        np.savez_compressed(out / f"pool_round_{round_id}.npz", **pool_arrays)
-        torch.save(model.state_dict(), out / "surrogate.pt")
-        torch.save(ddpm.state_dict(), out / "ddpm.pt")
+        try:
+            torch.save(model.state_dict(), out / "surrogate.pt", _use_new_zipfile_serialization=False)
+        except Exception:
+            torch.save(model.state_dict(), out / "surrogate.pt")
+        try:
+            torch.save(ddpm.state_dict(), out / "ddpm.pt", _use_new_zipfile_serialization=False)
+        except Exception:
+            torch.save(ddpm.state_dict(), out / "ddpm.pt")
         save_checkpoint(checkpoint, round_id, model, ddpm, pool, history, rng, wandb_run_id)
+        
+        # Continuously persist history.json at every round
+        (out / "history.json").write_text(json.dumps(history, indent=2))
+        
         save_sec = time.perf_counter() - phase_start
         round_total_sec = time.perf_counter() - round_start_time
         print(

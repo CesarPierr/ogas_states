@@ -50,7 +50,10 @@ def save_checkpoint(
     if torch.cuda.is_available():
         payload["torch_cuda_rng_state"] = torch.cuda.get_rng_state_all()
     tmp = path.with_suffix(".tmp")
-    torch.save(payload, tmp)
+    try:
+        torch.save(payload, tmp, _use_new_zipfile_serialization=False)
+    except Exception:
+        torch.save(payload, tmp)
     tmp.replace(path)
 
 
